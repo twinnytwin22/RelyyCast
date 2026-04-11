@@ -30,6 +30,10 @@ npm run dev         # Next.js UI on :3000
 npm run api:dev     # standalone control-plane on :8787
 npm run stream:dev  # local stream origin on :8177
 npm run stream:ingest:tone # ffmpeg tone generator into /ingest
+npm run app:view    # open :3000 in app-style window (Edge/Chrome app mode on Windows)
+npm run dev:app     # run app-style view; reuses existing :3000 dev server if already running
+npm run neutralino:update # download Neutralino runtime binary
+npm run dev:neutralino    # run real Neutralino native window (frameless config)
 ```
 
 Build:

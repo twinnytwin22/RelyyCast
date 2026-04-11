@@ -1,10 +1,6 @@
-import type { Metadata } from "next";
+'use client';
 import "./globals.css";
 
-export const metadata: Metadata = {
-  title: "RelyyCast",
-  description: "RelyyCast control plane for desktop-powered public streams.",
-};
 
 export default function RootLayout({
   children,

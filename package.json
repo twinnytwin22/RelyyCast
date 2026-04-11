@@ -4,6 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "neutralino:run": "node scripts/run-neutralino.mjs",
+    "neutralino:update": "npx neu update",
+    "_dev:neutralino:stack": "concurrently -k -n WEB,NEU -c cyan,green \"npm:dev\" \"npm:neutralino:run\"",
+    "dev:neutralino": "node scripts/dev-neutralino.mjs",
+    "app:view": "node scripts/open-app-view.mjs",
+    "_dev:app:stack": "concurrently -n WEB,APP -c cyan,green \"npm:dev\" \"npm:app:view\"",
+    "dev:app": "node scripts/dev-app.mjs",
     "api:dev": "node server/control-plane-server.mjs",
     "stream:dev": "node scripts/local-stream-server.mjs",
     "stream:ingest:tone": "node scripts/ffmpeg-to-stream.mjs",
@@ -20,6 +27,7 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
+    "@neutralinojs/neu": "^11.7.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

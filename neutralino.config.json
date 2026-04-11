@@ -1,0 +1,48 @@
+{
+  "$schema": "https://neutralino.js.org/schemas/neutralino.config.schema.json",
+  "applicationId": "com.relyycast.app",
+  "version": "0.1.0",
+  "defaultMode": "window",
+  "port": 0,
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "tokenSecurity": "one-time",
+  "url": "http://127.0.0.1:3000",
+  "nativeAllowList": [
+    "app.*",
+    "window.*",
+    "events.*"
+  ],
+  "modes": {
+    "window": {
+      "title": "RelyyCast",
+      "width": 1024,
+      "height": 500,
+      "minWidth": 1024,
+      "minHeight": 500,
+      "maxWidth": 1024,
+      "maxHeight": 500,
+      "center": true,
+      "borderless": true,
+      "resizable": false,
+      "maximizable": false,
+      "fullScreen": false,
+      "maximize": false,
+      "useSavedState": false,
+      "exitProcessOnClose": true,
+      "enableInspector": true,
+      "injectGlobals": true,
+      "injectClientLibrary": true
+    }
+  },
+  "cli": {
+    "binaryName": "relyycast",
+    "resourcesPath": "./resources/",
+    "extensionsPath": "./extensions/",
+    "binaryVersion": "6.7.0"
+  },
+  "logging": {
+    "enabled": true,
+    "writeToLogFile": false
+  }
+}
