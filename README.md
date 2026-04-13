@@ -34,6 +34,7 @@ npm run app:view    # open :3000 in app-style window (Edge/Chrome app mode on Wi
 npm run dev:app     # run app-style view; reuses existing :3000 dev server if already running
 npm run neutralino:update # download Neutralino runtime binary
 npm run dev:neutralino    # run real Neutralino native window (frameless config)
+npm run neutralino:build   # package the Neutralino app using the staged runtime assets
 ```
 
 Build:
@@ -41,6 +42,8 @@ Build:
 ```bash
 npm run build
 ```
+
+`npm run build` now stages MediaMTX into `build/mediamtx/...` so the packaged app resources carry the repo-local relay binary and config for the current platform.
 
 Lint:
 
@@ -68,34 +71,35 @@ set VITE_STREAM_ORIGIN_URL=http://127.0.0.1:8177
 npm run dev
 ```
 
-## Current scaffold endpoints
+## Current server endpoints
 
-Standalone control-plane server (`npm run api:dev`):
+Unified server (`npm run server:dev`):
 
-- `GET /health`
-- `POST /api/desktop/pair/start`
-- `POST /api/desktop/pair/approve`
-- `POST /api/desktop/pair/status`
-- `POST /api/desktop/heartbeat`
-- `GET /api/desktop/heartbeat?agentId=...`
-
-Local stream origin (`npm run stream:dev`):
-
-- `GET /health`
+- `GET /health` (aggregated relay + ingest + mp3 bridge status)
+- `GET /api/config`
+- `POST /api/config`
 - `GET /api/mounts`
-- `GET|HEAD /<mount>` (examples: `/station1`, `/live`, `/stream`, `/live.mp3`)
-- `SOURCE|PUT|POST /<mount>` (source publishing)
-- `GET|POST /admin/metadata?mount=/live&song=Artist+-+Track`
-- `POST /ingest?mount=/live` (legacy helper endpoint; forwards to source handler)
+- `GET|HEAD /live.mp3` (MP3 compatibility endpoint)
+- `GET /hls/<relayPath>/index.m3u8` (HLS proxy passthrough)
+- `SOURCE|PUT|POST /<mount>` (source publishing into local MP3 fanout)
+- `GET|POST /admin/metadata?mount=/live.mp3&song=Artist+-+Track`
+- `POST /api/pair/start` + legacy `/api/desktop/pair/start`
+- `POST /api/pair/approve` + legacy `/api/desktop/pair/approve`
+- `GET|POST /api/pair/status` + legacy `/api/desktop/pair/status`
+- `POST /api/heartbeat` + legacy `/api/desktop/heartbeat`
+- `GET /api/heartbeat?agentId=...` + legacy `/api/desktop/heartbeat?agentId=...`
 
-FFmpeg ingest helper (`npm run stream:ingest:tone`):
+Media relay process model:
 
-- Sends audio into a source mount (defaults to synthetic tone)
-- Default publish target is `SOURCE http://127.0.0.1:8177/live.mp3`
-- Uses `FFMPEG_BIN` or `RELYY_RADIO_FFMPEG_PATH` when set
-- Override destination with `RELYY_STREAM_INGEST_URL`, or use `RELYY_STREAM_BASE_URL` + `RELYY_STREAM_MOUNT`
-- Override source method with `RELYY_STREAM_SOURCE_METHOD` (`SOURCE`, `PUT`, or `POST`)
-- Relay a client stream URL by setting `RELYY_STREAM_INPUT_URL` (for example `http://127.0.0.1:4850/live.mp3`)
-- Force synthetic tone mode with `RELYY_STREAM_INPUT_MODE=tone`
-- Set source auth using `RELYY_STREAM_SOURCE_USER` + `RELYY_STREAM_SOURCE_PASSWORD`
-- Override ffmpeg path with `FFMPEG_BIN`
+- `mediamtx` is managed as a child process by `server/server.mjs`
+- By default it resolves repo-local assets first: `mediamtx/win/mediamtx.exe` on Windows, `mediamtx/mac/mediamtx` on macOS, and `mediamtx/mediamtx.yml` for config
+- Built app resources stage the same assets under `build/mediamtx/...` during `npm run build`
+- FFmpeg ingest path: `config.inputUrl` -> `rtmp://127.0.0.1:1935/<relayPath>`
+- FFmpeg MP3 bridge path: `rtmp://127.0.0.1:1935/<relayPath>` -> `SOURCE http://127.0.0.1:8177/live.mp3`
+
+Media relay environment overrides:
+
+- `RELYY_MEDIAMTX_PATH`
+- `RELYY_MEDIAMTX_CONFIG`
+- `RELYY_MEDIAMTX_RTMP_URL`
+- `RELYY_MEDIAMTX_HLS_ORIGIN`

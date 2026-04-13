@@ -28,6 +28,7 @@ This contract is intentionally fixed while migrating clients from split servers 
 - `GET /health`
 - `GET /mounts` (canonical)
 - `GET /api/mounts` (legacy alias)
+- `GET /hls/<relayPath>/index.m3u8` (HLS passthrough proxy)
 - `POST /metadata?mount=/live.mp3&song=Artist+-+Track` (canonical)
 - `GET /metadata?...` (compat)
 - `POST /admin/metadata?...` (legacy alias)

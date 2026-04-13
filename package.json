@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 3000",
     "neutralino:run": "npx neu run",
+    "neutralino:build": "npx neu build",
     "neutralino:update": "npx neu update",
     "dev:neutralino": "npx neu run",
     "app:view": "node scripts/open-app-view.mjs",
@@ -12,7 +13,7 @@
     "dev:app": "node scripts/dev-app.mjs",
     "server:dev": "node server/server.mjs",
     "stack:dev": "concurrently -k -n WEB,SERVER -c cyan,yellow \"npm:neutralino:run\" \"npm:server:dev\"",
-    "build": "vite build",
+    "build": "vite build && node scripts/sync-runtime-assets.mjs",
     "start": "vite preview --host 127.0.0.1 --port 3000",
     "lint": "eslint ."
   },

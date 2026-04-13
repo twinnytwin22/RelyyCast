@@ -14,6 +14,29 @@ type ServerConfig = {
   description: string;
   bitrate: string;
   ffmpegPath: string;
+  relayPath: string;
+  mediamtxPath: string;
+  mediamtxConfigPath: string;
+};
+
+type ProcessRuntime = {
+  running: boolean;
+  lastStartAt: string | null;
+  lastExitAt: string | null;
+  lastExitCode: number | null;
+  lastError: string | null;
+};
+
+type StreamHealth = {
+  listenerCount: number;
+  bytesIn: number;
+  chunkCount: number;
+  lastChunkAt: string | null;
+  relayPathReady: boolean;
+  hlsUrl: string;
+  relay: ProcessRuntime;
+  ingest: ProcessRuntime;
+  mp3Bridge: ProcessRuntime;
 };
 
 const SETTINGS_STORAGE_KEY = "relyycast:server-config";
@@ -25,6 +48,9 @@ const DEFAULT_SERVER_CONFIG: ServerConfig = {
   description: "Local FFmpeg test source",
   bitrate: "128k",
   ffmpegPath: "",
+  relayPath: "live",
+  mediamtxPath: "",
+  mediamtxConfigPath: "",
 };
 
 function normalizeServerConfig(input: unknown): ServerConfig {
@@ -36,6 +62,21 @@ function normalizeServerConfig(input: unknown): ServerConfig {
     description: typeof source.description === "string" ? source.description : DEFAULT_SERVER_CONFIG.description,
     bitrate: typeof source.bitrate === "string" ? source.bitrate : DEFAULT_SERVER_CONFIG.bitrate,
     ffmpegPath: typeof source.ffmpegPath === "string" ? source.ffmpegPath : DEFAULT_SERVER_CONFIG.ffmpegPath,
+    relayPath: typeof source.relayPath === "string" ? source.relayPath : DEFAULT_SERVER_CONFIG.relayPath,
+    mediamtxPath: typeof source.mediamtxPath === "string" ? source.mediamtxPath : DEFAULT_SERVER_CONFIG.mediamtxPath,
+    mediamtxConfigPath:
+      typeof source.mediamtxConfigPath === "string" ? source.mediamtxConfigPath : DEFAULT_SERVER_CONFIG.mediamtxConfigPath,
+  };
+}
+
+function normalizeProcessRuntime(input: unknown): ProcessRuntime {
+  const source = input && typeof input === "object" ? (input as Partial<ProcessRuntime>) : {};
+  return {
+    running: source.running === true,
+    lastStartAt: typeof source.lastStartAt === "string" ? source.lastStartAt : null,
+    lastExitAt: typeof source.lastExitAt === "string" ? source.lastExitAt : null,
+    lastExitCode: typeof source.lastExitCode === "number" ? source.lastExitCode : null,
+    lastError: typeof source.lastError === "string" ? source.lastError : null,
   };
 }
 
@@ -68,7 +109,7 @@ const tabs: Array<{ id: TabId; label: string; tip: string }> = [
   {
     id: "stream",
     label: "Stream",
-    tip: "Public MP3 URL and playback helpers.",
+    tip: "Public MP3 and HLS URLs plus relay diagnostics.",
   },
   {
     id: "agent",
@@ -98,12 +139,7 @@ export function StationConsole() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [darkMode, setDarkMode] = useState(true);
   const [now, setNow] = useState(() => new Date());
-  const [streamHealth, setStreamHealth] = useState<{
-    listenerCount: number;
-    bytesIn: number;
-    chunkCount: number;
-    lastChunkAt: string | null;
-  } | null>(null);
+  const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null);
   const [serverConfig, setServerConfig] = useState<ServerConfig>(DEFAULT_SERVER_CONFIG);
   const [settingsStatus, setSettingsStatus] = useState("Waiting for config sync.");
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -111,6 +147,8 @@ export function StationConsole() {
 
   const serverUrl = import.meta.env.VITE_SERVER_URL ?? "http://127.0.0.1:8177";
   const streamUrl = `${serverUrl}/live.mp3`;
+  const fallbackHlsUrl = `${serverUrl}/hls/${serverConfig.relayPath || "live"}/index.m3u8`;
+  const hlsUrl = streamHealth?.hlsUrl || fallbackHlsUrl;
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -137,7 +175,16 @@ export function StationConsole() {
           bytesIn: number;
           chunkCount: number;
           lastChunkAt: string | null;
+          relayPathReady?: boolean;
+          hlsUrl?: string;
+          relay?: unknown;
+          ingest?: unknown;
+          mp3Bridge?: unknown;
         };
+
+        const hlsPath = typeof json.hlsUrl === "string" && json.hlsUrl
+          ? json.hlsUrl
+          : `/hls/${serverConfig.relayPath || "live"}/index.m3u8`;
 
         if (alive) {
           setStreamHealth({
@@ -145,6 +192,13 @@ export function StationConsole() {
             bytesIn: json.bytesIn,
             chunkCount: json.chunkCount,
             lastChunkAt: json.lastChunkAt,
+            relayPathReady: json.relayPathReady === true,
+            hlsUrl: hlsPath.startsWith("http")
+              ? hlsPath
+              : `${serverUrl}${hlsPath.startsWith("/") ? hlsPath : `/${hlsPath}`}`,
+            relay: normalizeProcessRuntime(json.relay),
+            ingest: normalizeProcessRuntime(json.ingest),
+            mp3Bridge: normalizeProcessRuntime(json.mp3Bridge),
           });
         }
       } catch {
@@ -163,7 +217,7 @@ export function StationConsole() {
       alive = false;
       window.clearInterval(timer);
     };
-  }, [serverUrl]);
+  }, [serverUrl, serverConfig.relayPath]);
 
   useEffect(() => {
     let alive = true;
@@ -310,6 +364,7 @@ export function StationConsole() {
               >
                 {renderTab(activeTab, {
                   streamUrl,
+                  hlsUrl,
                   streamHealth,
                   serverConfig,
                   settingsStatus,
@@ -326,7 +381,7 @@ export function StationConsole() {
             <aside className="space-y-2.5">
               <Panel eyebrow="State" title="Core values" body="">
                 <div className="grid gap-1.5">
-                  {statsForView(streamUrl).map((item) => (
+                  {statsForView(streamUrl, hlsUrl).map((item) => (
                     <ValueRow
                       key={item.label}
                       label={item.label}
@@ -361,8 +416,8 @@ const tabMeta: Record<TabId, { eyebrow: string; title: string; body: string | nu
   },
   stream: {
     eyebrow: "Stream",
-    title: "Public MP3 endpoint",
-    body: "URL and playback.",
+    title: "Public MP3 + HLS endpoints",
+    body: "Playback, relay health, and process status.",
   },
   agent: {
     eyebrow: "Agent",
@@ -385,12 +440,8 @@ function renderTab(
   tab: TabId,
   context: {
     streamUrl: string;
-    streamHealth: {
-      listenerCount: number;
-      bytesIn: number;
-      chunkCount: number;
-      lastChunkAt: string | null;
-    } | null;
+    hlsUrl: string;
+    streamHealth: StreamHealth | null;
     serverConfig: ServerConfig;
     settingsStatus: string;
     settingsError: string | null;
@@ -438,34 +489,43 @@ function renderTab(
     case "stream":
       return (
         <div className="space-y-1.5">
-          <ValueRow label="Stream URL" value={context.streamUrl} />
-          <div className="grid gap-1.5 sm:grid-cols-3">
+          <ValueRow label="MP3 URL" value={context.streamUrl} />
+          <ValueRow label="HLS URL" value={context.hlsUrl} />
+          <div className="grid gap-1.5 sm:grid-cols-4">
             <ActionButton
               tip="Copy the public MP3 URL to your clipboard."
               onClick={() => {
                 void navigator.clipboard.writeText(context.streamUrl);
               }}
             >
-              Copy URL
+              Copy MP3
             </ActionButton>
             <ActionButton
-              tip="Open the URL in a new player or browser tab."
+              tip="Open the MP3 URL in a new player or browser tab."
               onClick={() => {
                 window.open(context.streamUrl, "_blank", "noopener,noreferrer");
               }}
             >
-              Open player
+              Open MP3
             </ActionButton>
             <ActionButton
-              tip="Read local health to verify the stream origin is reachable."
+              tip="Open the proxied HLS playlist."
+              onClick={() => {
+                window.open(context.hlsUrl, "_blank", "noopener,noreferrer");
+              }}
+            >
+              Open HLS
+            </ActionButton>
+            <ActionButton
+              tip="Read local health to verify the relay and bridge are reachable."
               onClick={() => {
                 window.open(`${context.streamUrl.replace("/live.mp3", "")}/health`, "_blank", "noopener,noreferrer");
               }}
             >
-              Test stream
+              Open health
             </ActionButton>
           </div>
-          <div className="grid gap-1.5 sm:grid-cols-2">
+          <div className="grid gap-1.5 sm:grid-cols-3">
             <ValueRow
               label="Listeners"
               value={context.streamHealth ? String(context.streamHealth.listenerCount) : "unavailable"}
@@ -477,6 +537,22 @@ function renderTab(
             <ValueRow
               label="Bytes ingested"
               value={context.streamHealth ? String(context.streamHealth.bytesIn) : "unavailable"}
+            />
+            <ValueRow
+              label="Relay path"
+              value={context.streamHealth?.relayPathReady ? "ready" : "pending"}
+            />
+            <ValueRow
+              label="Relay process"
+              value={formatProcessState(context.streamHealth?.relay)}
+            />
+            <ValueRow
+              label="Ingest process"
+              value={formatProcessState(context.streamHealth?.ingest)}
+            />
+            <ValueRow
+              label="MP3 bridge"
+              value={formatProcessState(context.streamHealth?.mp3Bridge)}
             />
             <ValueRow
               label="Last chunk"
@@ -544,6 +620,30 @@ function renderTab(
             placeholder="C:\\ffmpeg\\bin\\ffmpeg.exe"
             onChange={(value) => {
               context.onSettingsFieldChange("ffmpegPath", value);
+            }}
+          />
+          <ConfigField
+            label="Relay Path"
+            value={context.serverConfig.relayPath}
+            placeholder="live"
+            onChange={(value) => {
+              context.onSettingsFieldChange("relayPath", value);
+            }}
+          />
+          <ConfigField
+            label="MediaMTX Path"
+            value={context.serverConfig.mediamtxPath}
+            placeholder="mediamtx\\win\\mediamtx.exe"
+            onChange={(value) => {
+              context.onSettingsFieldChange("mediamtxPath", value);
+            }}
+          />
+          <ConfigField
+            label="MediaMTX Config Path"
+            value={context.serverConfig.mediamtxConfigPath}
+            placeholder="mediamtx\\mediamtx.yml"
+            onChange={(value) => {
+              context.onSettingsFieldChange("mediamtxConfigPath", value);
             }}
           />
           <button
@@ -698,12 +798,33 @@ function ActionButton({
   );
 }
 
-function statsForView(streamUrl: string) {
+function formatProcessState(process: ProcessRuntime | undefined) {
+  if (!process) {
+    return "unavailable";
+  }
+
+  if (process.running) {
+    return "running";
+  }
+
+  if (process.lastError) {
+    return `error (${process.lastError})`;
+  }
+
+  if (process.lastExitCode !== null) {
+    return `stopped (${process.lastExitCode})`;
+  }
+
+  return "stopped";
+}
+
+function statsForView(streamUrl: string, hlsUrl: string) {
   return [
-    { label: "Stream URL", value: streamUrl },
+    { label: "MP3 URL", value: streamUrl },
+    { label: "HLS URL", value: hlsUrl },
     { label: "Default host", value: "wxyz.stream.relyycast.com" },
     { label: "Input", value: "BlackHole 2ch" },
-    { label: "Bitrate", value: "128 kbps stereo" },
+    { label: "Relay", value: "MediaMTX + MP3 bridge" },
   ];
 }
 

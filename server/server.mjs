@@ -1,9 +1,11 @@
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.RELYY_SERVER_PORT ?? process.env.RELYY_STREAM_PORT ?? 8177);
@@ -22,9 +24,15 @@ const ICY_META_INT = Math.max(256, Number(process.env.RELYY_STREAM_ICY_METAINT ?
 
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 const FFMPEG_RESTART_BACKOFF_MS = 2000;
+const MEDIAMTX_RESTART_BACKOFF_MS = 3000;i 
 const SAMPLE_RATE = process.env.RELYY_STREAM_SAMPLE_RATE ?? "44100";
 const CHANNELS = process.env.RELYY_STREAM_CHANNELS ?? "2";
 const CONFIG_FILE_PATH = path.resolve(process.cwd(), ".tmp", "relyy-config.json");
+const SERVER_DIR_PATH = path.dirname(fileURLToPath(import.meta.url));
+
+const DEFAULT_MEDIAMTX_RTMP_URL = "rtmp://127.0.0.1:1935";
+const DEFAULT_MEDIAMTX_HLS_ORIGIN = "http://127.0.0.1:8888";
+const DEFAULT_MEDIAMTX_API_ORIGIN = "http://127.0.0.1:9997";
 
 const DEFAULT_CONFIG = Object.freeze({
   inputUrl: "http://127.0.0.1:4850/live.mp3",
@@ -33,6 +41,9 @@ const DEFAULT_CONFIG = Object.freeze({
   description: "Local FFmpeg test source",
   bitrate: "128k",
   ffmpegPath: "",
+  relayPath: "live",
+  mediamtxPath: "",
+  mediamtxConfigPath: "",
 });
 
 // Step 1: API compatibility is intentionally locked during the merge.
@@ -51,20 +62,77 @@ const heartbeatsByAgent = new Map();
 const startedAt = Date.now();
 
 let configFromFile = { ...DEFAULT_CONFIG };
-let ffmpegProc = null;
-let ingestReq = null;
 let shuttingDown = false;
-let restartRequested = false;
-let suppressRestartOnce = false;
-let restartTimer = null;
+
+let mediamtxProc = null;
+let ingestFfmpegProc = null;
+let bridgeFfmpegProc = null;
+let bridgeIngestReq = null;
+
+let mediamtxRestartRequested = false;
+let suppressMediatxRestartOnce = false;
+let mediamtxRestartTimer = null;
+
+let ingestRestartRequested = false;
+let suppressIngestRestartOnce = false;
+let ingestRestartTimer = null;
+
+let bridgeRestartRequested = false;
+let suppressBridgeRestartOnce = false;
+let bridgeRestartTimer = null;
+let bridgeStartPending = false;
+
+const relayProcessState = createProcessState();
+const ingestProcessState = createProcessState();
+const bridgeProcessState = createProcessState();
 
 await initializeConfigFile();
+
+function createProcessState() {
+  return {
+    running: false,
+    pid: null,
+    lastStartAt: 0,
+    lastExitAt: 0,
+    lastExitCode: null,
+    lastError: null,
+  };
+}
+
+function markProcessStarted(state, proc) {
+  state.running = true;
+  state.pid = proc.pid ?? null;
+  state.lastStartAt = Date.now();
+  state.lastError = null;
+}
+
+function markProcessErrored(state, message) {
+  state.lastError = message;
+}
+
+function markProcessStopped(state, exitCode) {
+  state.running = false;
+  state.pid = null;
+  state.lastExitAt = Date.now();
+  state.lastExitCode = typeof exitCode === "number" ? exitCode : null;
+}
+
+function serializeProcessState(state) {
+  return {
+    running: state.running,
+    pid: state.pid,
+    lastStartAt: state.lastStartAt ? new Date(state.lastStartAt).toISOString() : null,
+    lastExitAt: state.lastExitAt ? new Date(state.lastExitAt).toISOString() : null,
+    lastExitCode: state.lastExitCode,
+    lastError: state.lastError,
+  };
+}
 
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, SOURCE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Icy-MetaData",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, Icy-MetaData, Range",
   };
 }
 
@@ -107,6 +175,22 @@ function normalizeMountPath(rawPath) {
   return mount;
 }
 
+function normalizeRelayPath(value) {
+  if (typeof value !== "string") {
+    return DEFAULT_CONFIG.relayPath;
+  }
+
+  const relayPath = value.trim().replace(/^\/+|\/+$/g, "");
+  if (!relayPath || relayPath.includes("..")) {
+    return DEFAULT_CONFIG.relayPath;
+  }
+
+  if (!/^[A-Za-z0-9._~!$&'()*+,;=:@/-]+$/.test(relayPath)) {
+    return DEFAULT_CONFIG.relayPath;
+  }
+  return relayPath;
+}
+
 function isReservedPath(pathname) {
   return (
     pathname === "/health" ||
@@ -115,6 +199,9 @@ function isReservedPath(pathname) {
     pathname === "/metadata" ||
     pathname === "/admin/metadata" ||
     pathname === "/api/config" ||
+    pathname === "/hls" ||
+    pathname === "/hls/" ||
+    pathname.startsWith("/hls/") ||
     pathname.startsWith("/api/")
   );
 }
@@ -138,6 +225,9 @@ function normalizeConfig(input) {
     description: sanitizeMetadataValue(String(input.description ?? DEFAULT_CONFIG.description), 180) || DEFAULT_CONFIG.description,
     bitrate: sanitizeMetadataValue(String(input.bitrate ?? DEFAULT_CONFIG.bitrate), 24) || DEFAULT_CONFIG.bitrate,
     ffmpegPath: normalizeExecutablePath(input.ffmpegPath ?? DEFAULT_CONFIG.ffmpegPath),
+    relayPath: normalizeRelayPath(String(input.relayPath ?? DEFAULT_CONFIG.relayPath)),
+    mediamtxPath: normalizeExecutablePath(input.mediamtxPath ?? DEFAULT_CONFIG.mediamtxPath),
+    mediamtxConfigPath: normalizeExecutablePath(input.mediamtxConfigPath ?? DEFAULT_CONFIG.mediamtxConfigPath),
   };
 }
 
@@ -151,6 +241,9 @@ function applyEnvOverrides(baseConfig) {
     process.env.RELYY_SERVER_FFMPEG_PATH ??
     process.env.FFMPEG_BIN ??
     process.env.RELYY_RADIO_FFMPEG_PATH;
+  const envRelayPath = process.env.RELYY_SERVER_RELAY_PATH ?? process.env.RELYY_STREAM_RELAY_PATH;
+  const envMediatxPath = process.env.RELYY_MEDIAMTX_PATH;
+  const envMediatxConfigPath = process.env.RELYY_MEDIAMTX_CONFIG;
 
   return normalizeConfig({
     ...baseConfig,
@@ -160,11 +253,44 @@ function applyEnvOverrides(baseConfig) {
     ...(envDescription ? { description: envDescription } : {}),
     ...(envBitrate ? { bitrate: envBitrate } : {}),
     ...(envFfmpegPath ? { ffmpegPath: envFfmpegPath } : {}),
+    ...(envRelayPath ? { relayPath: envRelayPath } : {}),
+    ...(envMediatxPath ? { mediamtxPath: envMediatxPath } : {}),
+    ...(envMediatxConfigPath ? { mediamtxConfigPath: envMediatxConfigPath } : {}),
   });
 }
 
 function getRuntimeConfig() {
   return applyEnvOverrides(configFromFile);
+}
+
+function normalizeBaseUrl(rawValue, fallback) {
+  const value = typeof rawValue === "string" ? rawValue.trim() : "";
+  const candidate = value || fallback;
+  return candidate.replace(/\/+$/g, "");
+}
+
+function getRelayEndpoints(config) {
+  const relayPath = normalizeRelayPath(config.relayPath ?? DEFAULT_CONFIG.relayPath);
+  const rtmpBaseUrl = normalizeBaseUrl(process.env.RELYY_MEDIAMTX_RTMP_URL, DEFAULT_MEDIAMTX_RTMP_URL);
+  const hlsOrigin = normalizeBaseUrl(process.env.RELYY_MEDIAMTX_HLS_ORIGIN, DEFAULT_MEDIAMTX_HLS_ORIGIN);
+  const apiOrigin = normalizeBaseUrl(process.env.RELYY_MEDIAMTX_API_ORIGIN, DEFAULT_MEDIAMTX_API_ORIGIN);
+
+  return {
+    relayPath,
+    rtmpBaseUrl,
+    rtmpPublishUrl: `${rtmpBaseUrl}/${relayPath}`,
+    rtmpReadUrl: `${rtmpBaseUrl}/${relayPath}`,
+    hlsOrigin,
+    hlsPath: `/hls/${relayPath}/index.m3u8`,
+    apiOrigin,
+  };
+}
+
+function hasRelayProcessConfigChanged(previousConfig, nextConfig) {
+  return (
+    previousConfig.mediamtxPath !== nextConfig.mediamtxPath ||
+    previousConfig.mediamtxConfigPath !== nextConfig.mediamtxConfigPath
+  );
 }
 
 async function initializeConfigFile() {
@@ -519,7 +645,103 @@ function handleSource(req, res, mountPath) {
   });
 }
 
-function handleHealth(res) {
+function toHttpStatusCode(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function findRelayPathEntry(payload, relayPath) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    if (item.name === relayPath || item.path === relayPath) {
+      return item;
+    }
+  }
+  return null;
+}
+
+async function fetchJson(urlValue, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    let target;
+    try {
+      target = new URL(urlValue);
+    } catch {
+      resolve({ ok: false, statusCode: null, payload: null });
+      return;
+    }
+
+    const transport = target.protocol === "https:" ? https : http;
+    const request = transport.request(
+      {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port ? Number(target.port) : undefined,
+        path: `${target.pathname}${target.search}`,
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          const statusCode = toHttpStatusCode(response.statusCode);
+          let payload = null;
+          if (chunks.length) {
+            try {
+              payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            } catch {
+              payload = null;
+            }
+          }
+          resolve({
+            ok: Boolean(statusCode && statusCode >= 200 && statusCode < 300),
+            statusCode,
+            payload,
+          });
+        });
+      },
+    );
+
+    request.setTimeout(timeoutMs, () => {
+      request.destroy();
+      resolve({ ok: false, statusCode: null, payload: null });
+    });
+    request.on("error", () => {
+      resolve({ ok: false, statusCode: null, payload: null });
+    });
+    request.end();
+  });
+}
+
+async function getRelayHealth(config) {
+  const relayEndpoints = getRelayEndpoints(config);
+  const response = await fetchJson(`${relayEndpoints.apiOrigin}/v3/paths/list`);
+  const relayPathEntry = findRelayPathEntry(response.payload, relayEndpoints.relayPath);
+  const relayPathReady = Boolean(
+    relayPathEntry &&
+      (relayPathEntry.sourceReady === true ||
+        relayPathEntry.ready === true ||
+        relayPathEntry.hasSource === true),
+  );
+
+  return {
+    ...relayEndpoints,
+    apiReachable: response.ok,
+    apiStatusCode: response.statusCode,
+    relayPathFound: Boolean(relayPathEntry),
+    relayPathReady,
+  };
+}
+
+async function handleHealth(res) {
   const mounts = Array.from(mountMap.values()).map((mount) => summarizeMount(mount));
 
   let bytesIn = 0;
@@ -533,6 +755,8 @@ function handleHealth(res) {
     }
   }
 
+  const relayHealth = await getRelayHealth(getRuntimeConfig());
+
   writeJson(res, 200, {
     ok: true,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
@@ -541,6 +765,22 @@ function handleHealth(res) {
     bytesIn,
     chunkCount,
     lastChunkAt: lastChunkAt ? new Date(lastChunkAt).toISOString() : null,
+    relayPath: relayHealth.relayPath,
+    relayPathReady: relayHealth.relayPathReady,
+    hlsUrl: relayHealth.hlsPath,
+    relay: {
+      ...serializeProcessState(relayProcessState),
+      apiReachable: relayHealth.apiReachable,
+      apiStatusCode: relayHealth.apiStatusCode,
+      relayPathFound: relayHealth.relayPathFound,
+      relayPathReady: relayHealth.relayPathReady,
+      apiOrigin: relayHealth.apiOrigin,
+      rtmpUrl: relayHealth.rtmpPublishUrl,
+      hlsOrigin: relayHealth.hlsOrigin,
+      hlsUrl: relayHealth.hlsPath,
+    },
+    ingest: serializeProcessState(ingestProcessState),
+    mp3Bridge: serializeProcessState(bridgeProcessState),
     mounts,
   });
 }
@@ -803,17 +1043,98 @@ function resolveFfmpegPath(config) {
   return process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
 }
 
-function buildFfmpegArgs(config) {
+function resolveMediatxPath(config) {
+  const explicitPath =
+    normalizeExecutablePath(config.mediamtxPath) ||
+    normalizeExecutablePath(process.env.RELYY_MEDIAMTX_PATH) ||
+    normalizeExecutablePath(process.env.MEDIAMTX_BIN);
+  if (explicitPath) {
+    return explicitPath;
+  }
+
+  const runtimeRoots = Array.from(
+    new Set([process.cwd(), path.resolve(process.cwd(), "build"), path.resolve(SERVER_DIR_PATH, "..")]),
+  );
+
+  if (process.platform === "win32") {
+    const windowsCandidates = [
+      ...runtimeRoots.flatMap((rootPath) => [
+        path.resolve(rootPath, "mediamtx", "win", "mediamtx.exe"),
+        path.resolve(rootPath, "bin", "mediamtx.exe"),
+        path.resolve(rootPath, "bin", "mediamtx", "mediamtx.exe"),
+      ]),
+      "C:\\mediamtx\\mediamtx.exe",
+    ];
+    for (const candidate of windowsCandidates) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    return "mediamtx.exe";
+  }
+
+  const unixCandidates = [
+    ...runtimeRoots.flatMap((rootPath) => [
+      ...(process.platform === "darwin" ? [path.resolve(rootPath, "mediamtx", "mac", "mediamtx")] : []),
+      path.resolve(rootPath, "bin", "mediamtx"),
+    ]),
+    "/usr/local/bin/mediamtx",
+    "/opt/homebrew/bin/mediamtx",
+  ];
+  for (const candidate of unixCandidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return "mediamtx";
+}
+
+function resolveMediatxConfigPath(config) {
+  const explicitPath =
+    normalizeExecutablePath(config.mediamtxConfigPath) ||
+    normalizeExecutablePath(process.env.RELYY_MEDIAMTX_CONFIG);
+  if (explicitPath) {
+    return explicitPath;
+  }
+
+  const runtimeRoots = Array.from(
+    new Set([process.cwd(), path.resolve(process.cwd(), "build"), path.resolve(SERVER_DIR_PATH, "..")]),
+  );
+  const configCandidates = runtimeRoots.flatMap((rootPath) => [
+    path.resolve(rootPath, "mediamtx", "mediamtx.yml"),
+    path.resolve(rootPath, "server", "mediamtx.yml"),
+  ]);
+
+  for (const candidate of configCandidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "";
+}
+
+function buildMediatxArgs(config) {
+  const configPath = resolveMediatxConfigPath(config);
+  return configPath ? [configPath] : [];
+}
+
+function getFfmpegReconnectArgs(inputUrl) {
+  const source = typeof inputUrl === "string" ? inputUrl.trim().toLowerCase() : "";
+
+  if (source.startsWith("http://") || source.startsWith("https://")) {
+    return ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"];
+  }
+
+  return [];
+}
+
+function buildIngestFfmpegArgs(config, rtmpPublishUrl) {
   return [
     "-hide_banner",
     "-loglevel",
     "warning",
-    "-reconnect",
-    "1",
-    "-reconnect_streamed",
-    "1",
-    "-reconnect_delay_max",
-    "2",
+    ...getFfmpegReconnectArgs(config.inputUrl),
     "-i",
     config.inputUrl,
     "-vn",
@@ -821,6 +1142,30 @@ function buildFfmpegArgs(config) {
     CHANNELS,
     "-ar",
     SAMPLE_RATE,
+    "-c:a",
+    "aac",
+    "-b:a",
+    config.bitrate,
+    "-f",
+    "flv",
+    rtmpPublishUrl,
+  ];
+}
+
+function buildBridgeFfmpegArgs(config, rtmpReadUrl) {
+  return [
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-i",
+    rtmpReadUrl,
+    "-vn",
+    "-ac",
+    CHANNELS,
+    "-ar",
+    SAMPLE_RATE,
+    "-c:a",
+    "libmp3lame",
     "-b:a",
     config.bitrate,
     "-f",
@@ -829,31 +1174,65 @@ function buildFfmpegArgs(config) {
   ];
 }
 
-function clearRestartTimer() {
-  if (restartTimer) {
-    clearTimeout(restartTimer);
-    restartTimer = null;
+function clearMediatxRestartTimer() {
+  if (mediamtxRestartTimer) {
+    clearTimeout(mediamtxRestartTimer);
+    mediamtxRestartTimer = null;
   }
 }
 
-function scheduleRestart() {
-  if (shuttingDown || restartTimer) {
+function clearIngestRestartTimer() {
+  if (ingestRestartTimer) {
+    clearTimeout(ingestRestartTimer);
+    ingestRestartTimer = null;
+  }
+}
+
+function clearBridgeRestartTimer() {
+  if (bridgeRestartTimer) {
+    clearTimeout(bridgeRestartTimer);
+    bridgeRestartTimer = null;
+  }
+}
+
+function scheduleMediatxRestart() {
+  if (shuttingDown || mediamtxRestartTimer) {
     return;
   }
-  restartTimer = setTimeout(() => {
-    restartTimer = null;
-    startFfmpeg();
+  mediamtxRestartTimer = setTimeout(() => {
+    mediamtxRestartTimer = null;
+    startMediatx();
+  }, MEDIAMTX_RESTART_BACKOFF_MS);
+}
+
+function scheduleIngestRestart() {
+  if (shuttingDown || ingestRestartTimer) {
+    return;
+  }
+  ingestRestartTimer = setTimeout(() => {
+    ingestRestartTimer = null;
+    startIngestFfmpeg();
   }, FFMPEG_RESTART_BACKOFF_MS);
 }
 
-function destroyIngestRequest() {
-  if (ingestReq) {
-    ingestReq.destroy();
-    ingestReq = null;
+function scheduleBridgeRestart() {
+  if (shuttingDown || bridgeRestartTimer) {
+    return;
+  }
+  bridgeRestartTimer = setTimeout(() => {
+    bridgeRestartTimer = null;
+    startBridgeFfmpeg();
+  }, FFMPEG_RESTART_BACKOFF_MS);
+}
+
+function destroyBridgeIngestRequest() {
+  if (bridgeIngestReq) {
+    bridgeIngestReq.destroy();
+    bridgeIngestReq = null;
   }
 }
 
-function createIngestRequest(config) {
+function createBridgeIngestRequest(config) {
   const sourceAuth = SOURCE_PASSWORD
     ? Buffer.from(`${SOURCE_USER}:${SOURCE_PASSWORD}`, "utf8").toString("base64")
     : null;
@@ -868,58 +1247,139 @@ function createIngestRequest(config) {
         "Content-Type": "audio/mpeg",
         "Transfer-Encoding": "chunked",
         Connection: "keep-alive",
-        "User-Agent": "relyycast-ffmpeg-source/1.0",
+        "User-Agent": "relyycast-mp3-bridge/1.0",
         "Ice-Name": config.stationName,
         "Ice-Genre": config.genre,
         "Ice-Description": config.description,
         ...(sourceAuth ? { Authorization: `Basic ${sourceAuth}` } : {}),
       },
     },
-    (res) => {
+    (response) => {
       let body = "";
-      res.on("data", (chunk) => {
+      response.on("data", (chunk) => {
         body += chunk.toString("utf8");
       });
-      res.on("end", () => {
+      response.on("end", () => {
         if (body.trim()) {
-          console.log(`[ingest] server response ${res.statusCode}: ${body.trim()}`);
+          console.log(`[mp3-bridge] source response ${response.statusCode}: ${body.trim()}`);
         }
       });
     },
   );
 
   request.on("error", (error) => {
-    console.error(`[ingest] request error: ${error.message}`);
-    if (ffmpegProc && !ffmpegProc.killed) {
-      ffmpegProc.kill("SIGINT");
+    console.error(`[mp3-bridge] source request error: ${error.message}`);
+    if (bridgeFfmpegProc && !bridgeFfmpegProc.killed) {
+      bridgeFfmpegProc.kill("SIGINT");
     }
   });
 
   return request;
 }
 
-function startFfmpeg() {
-  if (shuttingDown || ffmpegProc) {
+function startMediatx() {
+  if (shuttingDown || mediamtxProc) {
     return;
   }
 
-  clearRestartTimer();
+  clearMediatxRestartTimer();
   const config = getRuntimeConfig();
-  const ffmpegPath = resolveFfmpegPath(config);
-  const args = buildFfmpegArgs(config);
+  const mediamtxPath = resolveMediatxPath(config);
+  const args = buildMediatxArgs(config);
 
-  console.log(`[ingest] spawning ${ffmpegPath} ${args.join(" ")}`);
-  console.log(`[ingest] self-ingest target ${SOURCE_METHOD} http://${HOST}:${PORT}${DEFAULT_MOUNT}`);
-
-  ffmpegProc = spawn(ffmpegPath, args, {
+  console.log(`[relay] spawning ${mediamtxPath} ${args.join(" ")}`.trim());
+  mediamtxProc = spawn(mediamtxPath, args, {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  ffmpegProc.on("spawn", () => {
-    ingestReq = createIngestRequest(config);
+  mediamtxProc.on("spawn", () => {
+    markProcessStarted(relayProcessState, mediamtxProc);
+    startIngestFfmpeg();
+    startBridgeFfmpeg();
   });
 
-  ffmpegProc.on("error", (error) => {
+  mediamtxProc.stdout.on("data", (chunk) => {
+    const line = chunk.toString("utf8").trim();
+    if (line) {
+      console.log(`[mediamtx] ${line}`);
+    }
+  });
+
+  mediamtxProc.stderr.on("data", (chunk) => {
+    const line = chunk.toString("utf8").trim();
+    if (line) {
+      console.log(`[mediamtx] ${line}`);
+    }
+  });
+
+  mediamtxProc.on("error", (error) => {
+    markProcessErrored(relayProcessState, error.message);
+    if (error && error.code === "ENOENT") {
+      console.error(`[relay] mediamtx not found at "${mediamtxPath}"`);
+      console.error("[relay] provide RELYY_MEDIAMTX_PATH or bundle mediamtx binary.");
+    } else {
+      console.error(`[relay] failed to start mediamtx: ${error.message}`);
+    }
+  });
+
+  mediamtxProc.on("close", (code) => {
+    const shouldRestartFromFailure = !shuttingDown && !suppressMediatxRestartOnce && code !== 0;
+    const shouldStartAfterRequestedRestart = mediamtxRestartRequested && !shuttingDown;
+
+    suppressMediatxRestartOnce = false;
+    mediamtxRestartRequested = false;
+    markProcessStopped(relayProcessState, code);
+    mediamtxProc = null;
+
+    if (ingestFfmpegProc && !ingestFfmpegProc.killed) {
+      suppressIngestRestartOnce = true;
+      ingestFfmpegProc.kill("SIGINT");
+    }
+    if (bridgeFfmpegProc && !bridgeFfmpegProc.killed) {
+      suppressBridgeRestartOnce = true;
+      bridgeFfmpegProc.kill("SIGINT");
+    }
+
+    console.log(`[relay] mediamtx exited with code ${code ?? "unknown"}`);
+
+    if (shouldStartAfterRequestedRestart) {
+      startMediatx();
+      return;
+    }
+
+    if (shouldRestartFromFailure) {
+      scheduleMediatxRestart();
+    }
+  });
+}
+
+function startIngestFfmpeg() {
+  if (shuttingDown || ingestFfmpegProc) {
+    return;
+  }
+
+  if (!mediamtxProc) {
+    scheduleIngestRestart();
+    return;
+  }
+
+  clearIngestRestartTimer();
+  const config = getRuntimeConfig();
+  const relayEndpoints = getRelayEndpoints(config);
+  const ffmpegPath = resolveFfmpegPath(config);
+  const args = buildIngestFfmpegArgs(config, relayEndpoints.rtmpPublishUrl);
+
+  console.log(`[ingest] spawning ${ffmpegPath} ${args.join(" ")}`);
+  ingestFfmpegProc = spawn(ffmpegPath, args, {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  ingestFfmpegProc.on("spawn", () => {
+    markProcessStarted(ingestProcessState, ingestFfmpegProc);
+  });
+
+  ingestFfmpegProc.on("error", (error) => {
+    markProcessErrored(ingestProcessState, error.message);
     if (error && error.code === "ENOENT") {
       console.error(`[ingest] ffmpeg not found at "${ffmpegPath}"`);
       console.error("[ingest] install FFmpeg or set config.ffmpegPath / RELYY_SERVER_FFMPEG_PATH / FFMPEG_BIN.");
@@ -928,84 +1388,232 @@ function startFfmpeg() {
     }
   });
 
-  ffmpegProc.stdout.on("data", (chunk) => {
-    if (!ingestReq) {
-      return;
-    }
-
-    const ok = ingestReq.write(chunk);
-    if (!ok) {
-      ffmpegProc.stdout.pause();
-      ingestReq.once("drain", () => {
-        if (ffmpegProc?.stdout) {
-          ffmpegProc.stdout.resume();
-        }
-      });
-    }
-  });
-
-  ffmpegProc.stderr.on("data", (chunk) => {
+  ingestFfmpegProc.stderr.on("data", (chunk) => {
     const line = chunk.toString("utf8").trim();
     if (line) {
-      console.log(`[ffmpeg] ${line}`);
+      console.log(`[ffmpeg-ingest] ${line}`);
     }
   });
 
-  ffmpegProc.on("close", (code) => {
-    const shouldRestartFromFailure = !shuttingDown && !suppressRestartOnce && code !== 0;
-    const shouldStartAfterRequestedRestart = restartRequested && !shuttingDown;
+  ingestFfmpegProc.on("close", (code) => {
+    const shouldRestartFromFailure = !shuttingDown && !suppressIngestRestartOnce && code !== 0;
+    const shouldStartAfterRequestedRestart = ingestRestartRequested && !shuttingDown;
 
-    suppressRestartOnce = false;
-    restartRequested = false;
-    ffmpegProc = null;
-
-    if (ingestReq) {
-      ingestReq.end();
-      ingestReq = null;
-    }
+    suppressIngestRestartOnce = false;
+    ingestRestartRequested = false;
+    markProcessStopped(ingestProcessState, code);
+    ingestFfmpegProc = null;
 
     console.log(`[ingest] ffmpeg exited with code ${code ?? "unknown"}`);
 
     if (shouldStartAfterRequestedRestart) {
-      startFfmpeg();
+      startIngestFfmpeg();
       return;
     }
 
     if (shouldRestartFromFailure) {
-      scheduleRestart();
+      scheduleIngestRestart();
     }
   });
 }
 
-function restartFfmpeg(reason) {
+async function startBridgeFfmpeg() {
+  if (shuttingDown || bridgeFfmpegProc || bridgeStartPending) {
+    return;
+  }
+
+  bridgeStartPending = true;
+
+  try {
+    if (!mediamtxProc) {
+      scheduleBridgeRestart();
+      return;
+    }
+
+    clearBridgeRestartTimer();
+    destroyBridgeIngestRequest();
+
+    const config = getRuntimeConfig();
+    const relayEndpoints = getRelayEndpoints(config);
+    const relayHealth = await getRelayHealth(config);
+    if (!relayHealth.relayPathReady) {
+      scheduleBridgeRestart();
+      return;
+    }
+
+    const ffmpegPath = resolveFfmpegPath(config);
+    const args = buildBridgeFfmpegArgs(config, relayEndpoints.rtmpReadUrl);
+
+    console.log(`[mp3-bridge] spawning ${ffmpegPath} ${args.join(" ")}`);
+    bridgeFfmpegProc = spawn(ffmpegPath, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    bridgeFfmpegProc.on("spawn", () => {
+      markProcessStarted(bridgeProcessState, bridgeFfmpegProc);
+    });
+
+    bridgeFfmpegProc.on("error", (error) => {
+      markProcessErrored(bridgeProcessState, error.message);
+      if (error && error.code === "ENOENT") {
+        console.error(`[mp3-bridge] ffmpeg not found at "${ffmpegPath}"`);
+        console.error("[mp3-bridge] install FFmpeg or set config.ffmpegPath / RELYY_SERVER_FFMPEG_PATH / FFMPEG_BIN.");
+      } else {
+        console.error(`[mp3-bridge] failed to start ffmpeg: ${error.message}`);
+      }
+    });
+
+    bridgeFfmpegProc.stdout.on("data", (chunk) => {
+      if (!bridgeIngestReq) {
+        bridgeIngestReq = createBridgeIngestRequest(config);
+      }
+
+      const ok = bridgeIngestReq.write(chunk);
+      if (!ok) {
+        bridgeFfmpegProc.stdout.pause();
+        bridgeIngestReq.once("drain", () => {
+          if (bridgeFfmpegProc?.stdout) {
+            bridgeFfmpegProc.stdout.resume();
+          }
+        });
+      }
+    });
+
+    bridgeFfmpegProc.stderr.on("data", (chunk) => {
+      const line = chunk.toString("utf8").trim();
+      if (line) {
+        console.log(`[ffmpeg-mp3-bridge] ${line}`);
+      }
+    });
+
+    bridgeFfmpegProc.on("close", (code) => {
+      const shouldRestartFromFailure = !shuttingDown && !suppressBridgeRestartOnce && code !== 0;
+      const shouldStartAfterRequestedRestart = bridgeRestartRequested && !shuttingDown;
+
+      suppressBridgeRestartOnce = false;
+      bridgeRestartRequested = false;
+      markProcessStopped(bridgeProcessState, code);
+      bridgeFfmpegProc = null;
+
+      if (bridgeIngestReq) {
+        bridgeIngestReq.end();
+        bridgeIngestReq = null;
+      }
+
+      console.log(`[mp3-bridge] ffmpeg exited with code ${code ?? "unknown"}`);
+
+      if (shouldStartAfterRequestedRestart) {
+        startBridgeFfmpeg();
+        return;
+      }
+
+      if (shouldRestartFromFailure) {
+        scheduleBridgeRestart();
+      }
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    markProcessErrored(bridgeProcessState, message);
+    console.error(`[mp3-bridge] failed before spawn: ${message}`);
+    scheduleBridgeRestart();
+  } finally {
+    bridgeStartPending = false;
+  }
+}
+
+function restartMediatx(reason) {
+  if (shuttingDown) {
+    return;
+  }
+
+  console.log(`[relay] restart requested (${reason})`);
+  clearMediatxRestartTimer();
+
+  if (!mediamtxProc) {
+    startMediatx();
+    return;
+  }
+
+  mediamtxRestartRequested = true;
+  suppressMediatxRestartOnce = true;
+  mediamtxProc.kill("SIGINT");
+}
+
+function restartIngestFfmpeg(reason) {
   if (shuttingDown) {
     return;
   }
 
   console.log(`[ingest] restart requested (${reason})`);
-  clearRestartTimer();
+  clearIngestRestartTimer();
 
-  if (!ffmpegProc) {
-    startFfmpeg();
+  if (!ingestFfmpegProc) {
+    startIngestFfmpeg();
     return;
   }
 
-  restartRequested = true;
-  suppressRestartOnce = true;
-  ffmpegProc.kill("SIGINT");
+  ingestRestartRequested = true;
+  suppressIngestRestartOnce = true;
+  ingestFfmpegProc.kill("SIGINT");
 }
 
-async function stopFfmpeg() {
-  shuttingDown = true;
-  clearRestartTimer();
-  destroyIngestRequest();
+function restartBridgeFfmpeg(reason) {
+  if (shuttingDown) {
+    return;
+  }
 
-  if (!ffmpegProc) {
+  console.log(`[mp3-bridge] restart requested (${reason})`);
+  clearBridgeRestartTimer();
+  destroyBridgeIngestRequest();
+
+  if (!bridgeFfmpegProc) {
+    startBridgeFfmpeg();
+    return;
+  }
+
+  bridgeRestartRequested = true;
+  suppressBridgeRestartOnce = true;
+  bridgeFfmpegProc.kill("SIGINT");
+}
+
+async function stopBridgeFfmpeg() {
+  clearBridgeRestartTimer();
+  destroyBridgeIngestRequest();
+
+  if (!bridgeFfmpegProc) {
     return;
   }
 
   await new Promise((resolve) => {
-    const proc = ffmpegProc;
+    const proc = bridgeFfmpegProc;
+    proc.once("close", () => resolve());
+    proc.kill("SIGINT");
+  });
+}
+
+async function stopIngestFfmpeg() {
+  clearIngestRestartTimer();
+
+  if (!ingestFfmpegProc) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    const proc = ingestFfmpegProc;
+    proc.once("close", () => resolve());
+    proc.kill("SIGINT");
+  });
+}
+
+async function stopMediatx() {
+  clearMediatxRestartTimer();
+
+  if (!mediamtxProc) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    const proc = mediamtxProc;
     proc.once("close", () => resolve());
     proc.kill("SIGINT");
   });
@@ -1013,6 +1621,108 @@ async function stopFfmpeg() {
 
 function pathMatches(pathname, options) {
   return options.includes(pathname);
+}
+
+function isHopByHopHeader(headerName) {
+  const lower = headerName.toLowerCase();
+  return (
+    lower === "connection" ||
+    lower === "keep-alive" ||
+    lower === "proxy-authenticate" ||
+    lower === "proxy-authorization" ||
+    lower === "te" ||
+    lower === "trailer" ||
+    lower === "transfer-encoding" ||
+    lower === "upgrade"
+  );
+}
+
+function buildHlsProxyHeaders(req) {
+  const forwardedHeaders = {};
+  const passthrough = [
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "cache-control",
+    "if-none-match",
+    "if-modified-since",
+    "origin",
+    "range",
+    "referer",
+    "user-agent",
+  ];
+
+  for (const key of passthrough) {
+    const value = req.headers[key];
+    if (typeof value === "string" && value) {
+      forwardedHeaders[key] = value;
+    }
+  }
+  return forwardedHeaders;
+}
+
+async function proxyHlsRequest(req, res, url) {
+  const relayEndpoints = getRelayEndpoints(getRuntimeConfig());
+  let targetOrigin;
+  try {
+    targetOrigin = new URL(relayEndpoints.hlsOrigin);
+  } catch {
+    writeJson(res, 500, { ok: false, error: "invalid RELYY_MEDIAMTX_HLS_ORIGIN value" });
+    return;
+  }
+
+  const suffixPath = url.pathname.slice("/hls".length) || "/";
+  const upstreamPath = `${suffixPath}${url.search}`;
+  const transport = targetOrigin.protocol === "https:" ? https : http;
+
+  await new Promise((resolve) => {
+    const proxyReq = transport.request(
+      {
+        protocol: targetOrigin.protocol,
+        hostname: targetOrigin.hostname,
+        port: targetOrigin.port ? Number(targetOrigin.port) : undefined,
+        method: req.method,
+        path: upstreamPath,
+        headers: buildHlsProxyHeaders(req),
+      },
+      (proxyRes) => {
+        const headers = {};
+        for (const [key, value] of Object.entries(proxyRes.headers)) {
+          if (isHopByHopHeader(key)) {
+            continue;
+          }
+          headers[key] = value;
+        }
+
+        res.writeHead(proxyRes.statusCode ?? 502, {
+          ...headers,
+          ...corsHeaders(),
+          "Cache-Control": "no-store, no-transform",
+        });
+
+        if (req.method === "HEAD") {
+          proxyRes.resume();
+          res.end();
+          resolve();
+          return;
+        }
+
+        proxyRes.pipe(res);
+        proxyRes.on("end", () => resolve());
+      },
+    );
+
+    proxyReq.on("error", (error) => {
+      if (!res.headersSent) {
+        writeJson(res, 502, { ok: false, error: `hls proxy upstream error: ${error.message}` });
+      } else {
+        res.end();
+      }
+      resolve();
+    });
+
+    proxyReq.end();
+  });
 }
 
 async function handleRequest(req, res) {
@@ -1031,8 +1741,13 @@ async function handleRequest(req, res) {
   const method = req.method.toUpperCase();
   const pathname = url.pathname;
 
+  if ((method === "GET" || method === "HEAD") && (pathname === "/hls" || pathname === "/hls/" || pathname.startsWith("/hls/"))) {
+    await proxyHlsRequest(req, res, url);
+    return;
+  }
+
   if (method === "GET" && pathname === "/health") {
-    handleHealth(res);
+    await handleHealth(res);
     return;
   }
 
@@ -1052,10 +1767,15 @@ async function handleRequest(req, res) {
   }
 
   if (method === "POST" && pathname === "/api/config") {
+    const previousConfig = { ...configFromFile };
     const body = await readJsonBody(req);
-    await persistConfig(body);
+    const nextConfig = await persistConfig(body);
     syncMountMetadataFromConfig(getRuntimeConfig());
-    restartFfmpeg("config update");
+    restartIngestFfmpeg("config update");
+    restartBridgeFfmpeg("config update");
+    if (hasRelayProcessConfigChanged(previousConfig, nextConfig)) {
+      restartMediatx("relay config update");
+    }
     writeJson(res, 200, getRuntimeConfig());
     return;
   }
@@ -1115,20 +1835,28 @@ const server = http.createServer((req, res) => {
   });
 });
 
+server.requestTimeout = 0;
+server.timeout = 0;
+server.keepAliveTimeout = 0;
+
 server.listen(PORT, HOST, () => {
   console.log(`[server] unified server listening on http://${HOST}:${PORT}`);
   console.log(`[server] source endpoint: ${SOURCE_METHOD}|PUT|POST ${DEFAULT_MOUNT}`);
   console.log("[server] listener endpoint: GET /<mount>");
-  startFfmpeg();
+  console.log("[server] hls proxy endpoint: GET /hls/<relayPath>/index.m3u8");
+  startMediatx();
 });
 
 process.on("SIGINT", async () => {
   console.log("[server] shutting down...");
+  shuttingDown = true;
   for (const mount of mountMap.values()) {
     endMountListeners(mount, "shutdown");
   }
 
-  await stopFfmpeg();
+  await stopBridgeFfmpeg();
+  await stopIngestFfmpeg();
+  await stopMediatx();
   server.close(() => {
     process.exit(0);
   });
