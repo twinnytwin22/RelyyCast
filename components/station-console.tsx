@@ -1,11 +1,21 @@
-
-
-import { useEffect, useState } from "react";
-import AgentOperationsPanel from "@/components/agent-operations-panel";
+import { useEffect, useMemo, useRef, useState } from "react";
 import AppStatusFooter from "@/components/chrome/AppStatusFooter";
 import AppWindowChrome from "@/components/chrome/AppWindowChrome";
+import {
+  type CloudflareMode,
+  getPersistedRuntimeStateSnapshot,
+  getRuntimeStateSnapshot,
+  RUNTIME_STATE_EVENT_NAME,
+  requestCloudflareLogin,
+  retryCloudflareSetup,
+  skipCloudflareForNow,
+  updateRuntimeConfig,
+  type RuntimeConfig,
+  type RuntimeProcessState,
+  type RuntimeState,
+} from "@/src/runtime/neutralino-runtime-orchestrator";
 
-type TabId = "overview" | "stream" | "agent" | "settings" | "log";
+type TabId = "control" | "settings";
 
 type ServerConfig = {
   inputUrl: string;
@@ -17,29 +27,45 @@ type ServerConfig = {
   relayPath: string;
   mediamtxPath: string;
   mediamtxConfigPath: string;
+  cloudflareMode: CloudflareMode;
+  cloudflareHostname: string;
+  cloudflareTunnelName: string;
 };
 
 type ProcessRuntime = {
   running: boolean;
-  lastStartAt: string | null;
-  lastExitAt: string | null;
-  lastExitCode: number | null;
   lastError: string | null;
 };
 
 type StreamHealth = {
   listenerCount: number;
-  bytesIn: number;
-  chunkCount: number;
-  lastChunkAt: string | null;
   relayPathReady: boolean;
   hlsUrl: string;
+  relayBytesReceived: number;
   relay: ProcessRuntime;
   ingest: ProcessRuntime;
   mp3Bridge: ProcessRuntime;
 };
 
+type RelayMetrics = {
+  listenerCount: number;
+  relayPathReady: boolean;
+  relayBytesReceived: number;
+};
+
+type Mp3HelperStatusPayload = {
+  listenerCount: number;
+};
+
+type MediaMtxPathPayload = {
+  ready: boolean;
+  bytesReceived: number;
+};
+
 const SETTINGS_STORAGE_KEY = "relyycast:server-config";
+const MEDIAMTX_CONTROL_API_URL = "http://127.0.0.1:9997/v3/paths/list";
+const CLOUDFLARE_ACTION_PENDING_TIMEOUT_MS = 1500;
+const RUNTIME_STATE_POLL_MS = 2000;
 
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   inputUrl: "http://127.0.0.1:4850/live.mp3",
@@ -51,10 +77,34 @@ const DEFAULT_SERVER_CONFIG: ServerConfig = {
   relayPath: "live",
   mediamtxPath: "",
   mediamtxConfigPath: "",
+  cloudflareMode: "temporary",
+  cloudflareHostname: "",
+  cloudflareTunnelName: "relyycast-local",
 };
+
+const OFFLINE_PROCESS: ProcessRuntime = {
+  running: false,
+  lastError: null,
+};
+
+const tabs: Array<{ id: TabId; label: string; tip: string }> = [
+  { id: "control", label: "Control", tip: "Cloudflare controls and stream status" },
+  { id: "settings", label: "Settings", tip: "Runtime configuration" },
+];
+
+function normalizeCloudflareMode(value: unknown, hostname: string): CloudflareMode {
+  if (value === "temporary" || value === "named") {
+    return value;
+  }
+  return hostname.trim() ? "named" : "temporary";
+}
 
 function normalizeServerConfig(input: unknown): ServerConfig {
   const source = input && typeof input === "object" ? (input as Partial<ServerConfig>) : {};
+  const cloudflareHostname =
+    typeof source.cloudflareHostname === "string"
+      ? source.cloudflareHostname
+      : DEFAULT_SERVER_CONFIG.cloudflareHostname;
   return {
     inputUrl: typeof source.inputUrl === "string" ? source.inputUrl : DEFAULT_SERVER_CONFIG.inputUrl,
     stationName: typeof source.stationName === "string" ? source.stationName : DEFAULT_SERVER_CONFIG.stationName,
@@ -65,19 +115,73 @@ function normalizeServerConfig(input: unknown): ServerConfig {
     relayPath: typeof source.relayPath === "string" ? source.relayPath : DEFAULT_SERVER_CONFIG.relayPath,
     mediamtxPath: typeof source.mediamtxPath === "string" ? source.mediamtxPath : DEFAULT_SERVER_CONFIG.mediamtxPath,
     mediamtxConfigPath:
-      typeof source.mediamtxConfigPath === "string" ? source.mediamtxConfigPath : DEFAULT_SERVER_CONFIG.mediamtxConfigPath,
+      typeof source.mediamtxConfigPath === "string"
+        ? source.mediamtxConfigPath
+        : DEFAULT_SERVER_CONFIG.mediamtxConfigPath,
+    cloudflareMode: normalizeCloudflareMode(source.cloudflareMode, cloudflareHostname),
+    cloudflareHostname,
+    cloudflareTunnelName:
+      typeof source.cloudflareTunnelName === "string"
+        ? source.cloudflareTunnelName
+        : DEFAULT_SERVER_CONFIG.cloudflareTunnelName,
   };
 }
 
-function normalizeProcessRuntime(input: unknown): ProcessRuntime {
-  const source = input && typeof input === "object" ? (input as Partial<ProcessRuntime>) : {};
+function mapRuntimeConfigToServerConfig(config: RuntimeConfig): ServerConfig {
+  return normalizeServerConfig({
+    inputUrl: config.inputUrl,
+    stationName: config.stationName,
+    genre: config.genre,
+    description: config.description,
+    bitrate: config.bitrate,
+    ffmpegPath: config.ffmpegPath,
+    relayPath: config.relayPath,
+    mediamtxPath: config.mediamtxPath,
+    mediamtxConfigPath: config.mediamtxConfigPath,
+    cloudflareMode: config.cloudflareMode,
+    cloudflareHostname: config.cloudflareHostname,
+    cloudflareTunnelName: config.cloudflareTunnelName,
+  });
+}
+
+function mapServerConfigToRuntimeConfig(config: ServerConfig): Partial<RuntimeConfig> {
+  const normalized = normalizeServerConfig(config);
   return {
-    running: source.running === true,
-    lastStartAt: typeof source.lastStartAt === "string" ? source.lastStartAt : null,
-    lastExitAt: typeof source.lastExitAt === "string" ? source.lastExitAt : null,
-    lastExitCode: typeof source.lastExitCode === "number" ? source.lastExitCode : null,
-    lastError: typeof source.lastError === "string" ? source.lastError : null,
+    inputUrl: normalized.inputUrl,
+    stationName: normalized.stationName,
+    genre: normalized.genre,
+    description: normalized.description,
+    bitrate: normalized.bitrate,
+    ffmpegPath: normalized.ffmpegPath,
+    relayPath: normalized.relayPath,
+    mediamtxPath: normalized.mediamtxPath,
+    mediamtxConfigPath: normalized.mediamtxConfigPath,
+    cloudflareMode: normalized.cloudflareMode,
+    cloudflareHostname: normalized.cloudflareHostname,
+    cloudflareTunnelName: normalized.cloudflareTunnelName,
   };
+}
+
+function normalizeProcessRuntime(input: RuntimeProcessState | undefined): ProcessRuntime {
+  if (!input) {
+    return OFFLINE_PROCESS;
+  }
+  return {
+    running: input.running === true,
+    lastError: typeof input.lastError === "string" ? input.lastError : null,
+  };
+}
+
+function normalizeMountPath(pathname: string | undefined) {
+  if (!pathname || pathname === "/") {
+    return "/live.mp3";
+  }
+  return pathname.startsWith("/") ? pathname : `/${pathname}`;
+}
+
+function buildHlsUrl(relayPath: string) {
+  const normalized = relayPath.trim().replace(/^\/+|\/+$/g, "") || "live";
+  return `http://127.0.0.1:8888/${normalized}/index.m3u8`;
 }
 
 function readStoredConfig(): ServerConfig | null {
@@ -96,58 +200,122 @@ function writeStoredConfig(config: ServerConfig) {
   try {
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(config));
   } catch {
-    // Ignore storage write errors in private/incognito contexts.
+    // Ignore storage write errors in restricted contexts.
   }
 }
 
-const tabs: Array<{ id: TabId; label: string; tip: string }> = [
-  {
-    id: "overview",
-    label: "Overview",
-    tip: "The quick station summary and current live state.",
-  },
-  {
-    id: "stream",
-    label: "Stream",
-    tip: "Public MP3 and HLS URLs plus relay diagnostics.",
-  },
-  {
-    id: "agent",
-    label: "Agent",
-    tip: "Desktop pairing and heartbeat status.",
-  },
-  {
-    id: "settings",
-    label: "Settings",
-    tip: "Server input, metadata, and FFmpeg runtime options.",
-  },
-  {
-    id: "log",
-    label: "Log",
-    tip: "Recent operator events and state changes.",
-  },
-];
+function toNumber(value: unknown, fallback = 0) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return fallback;
+}
 
-const events = [
-  "Desktop approved and config delivered.",
-  "cloudflared token rotated successfully.",
-  "Audio source switched to BlackHole 2ch.",
-  "Listener count held below the soft limit.",
-];
+function parseMp3HelperStatus(payload: unknown): Mp3HelperStatusPayload | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const source = payload as {
+    listenerCount?: unknown;
+  };
+
+  return {
+    listenerCount: toNumber(source.listenerCount, 0),
+  };
+}
+
+function parseMediaMtxPath(payload: unknown, relayPath: string): MediaMtxPathPayload | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const source = payload as {
+    items?: unknown;
+  };
+  if (!Array.isArray(source.items)) {
+    return null;
+  }
+
+  const pathItem = source.items.find((item) => {
+    if (!item || typeof item !== "object") {
+      return false;
+    }
+    return (item as { name?: unknown }).name === relayPath;
+  });
+  if (!pathItem || typeof pathItem !== "object") {
+    return null;
+  }
+
+  const candidate = pathItem as {
+    ready?: unknown;
+    bytesReceived?: unknown;
+  };
+
+  return {
+    ready: candidate.ready === true,
+    bytesReceived: toNumber(candidate.bytesReceived, 0),
+  };
+}
+
+function getRuntimeStateTimestamp(state: RuntimeState | null) {
+  if (!state?.lastUpdatedAt) {
+    return 0;
+  }
+  const timestamp = Date.parse(state.lastUpdatedAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function selectNewestRuntimeState(current: RuntimeState | null, persisted: RuntimeState | null) {
+  if (!current) {
+    return persisted;
+  }
+  if (!persisted) {
+    return current;
+  }
+  return getRuntimeStateTimestamp(persisted) >= getRuntimeStateTimestamp(current) ? persisted : current;
+}
 
 export function StationConsole() {
-  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [activeTab, setActiveTab] = useState<TabId>("control");
   const [darkMode, setDarkMode] = useState(true);
   const [now, setNow] = useState(() => new Date());
-  const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null);
+  const [runtimeState, setRuntimeState] = useState<RuntimeState | null>(() => getRuntimeStateSnapshot());
+  const [relayMetrics, setRelayMetrics] = useState<RelayMetrics | null>(null);
   const [serverConfig, setServerConfig] = useState<ServerConfig>(DEFAULT_SERVER_CONFIG);
-  const [settingsStatus, setSettingsStatus] = useState("Waiting for config sync.");
+  const [settingsStatus, setSettingsStatus] = useState("Waiting for runtime state.");
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [cloudflareActionPending, setCloudflareActionPending] = useState<"connect" | "retry" | "skip" | null>(null);
+  const [cloudflareActionError, setCloudflareActionError] = useState<string | null>(null);
+  const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const runtimeConfigSignature = useRef<string | null>(null);
 
-  const serverUrl = import.meta.env.VITE_SERVER_URL ?? "http://127.0.0.1:8177";
-  const streamUrl = `${serverUrl}/live.mp3`;
-  const fallbackHlsUrl = `${serverUrl}/hls/${serverConfig.relayPath || "live"}/index.m3u8`;
+  const relayPath = runtimeState?.config.relayPath || serverConfig.relayPath || "live";
+  const mountPath = normalizeMountPath(runtimeState?.config.mp3MountPath);
+  const localOrigin = `http://${runtimeState?.config.mp3HelperHost || "127.0.0.1"}:${runtimeState?.config.mp3HelperPort ?? 8177}`;
+  const localStreamUrl = `${localOrigin}${mountPath}`;
+  const publicOrigin = runtimeState?.cloudflare.publicUrl?.replace(/\/+$/g, "") || "";
+  const streamUrl = publicOrigin ? `${publicOrigin}${mountPath}` : localStreamUrl;
+  const helperStatusUrl = `${localOrigin}/_status`;
+  const fallbackHlsUrl = buildHlsUrl(relayPath);
+
+  const streamHealth = useMemo<StreamHealth | null>(() => {
+    if (!runtimeState && !relayMetrics) {
+      return null;
+    }
+
+    return {
+      listenerCount: relayMetrics?.listenerCount ?? 0,
+      relayPathReady: relayMetrics?.relayPathReady ?? false,
+      hlsUrl: fallbackHlsUrl,
+      relayBytesReceived: relayMetrics?.relayBytesReceived ?? 0,
+      relay: normalizeProcessRuntime(runtimeState?.processes.mediamtx),
+      ingest: normalizeProcessRuntime(runtimeState?.processes.ffmpegIngest),
+      mp3Bridge: normalizeProcessRuntime(runtimeState?.processes.ffmpegMp3Bridge),
+    };
+  }, [fallbackHlsUrl, relayMetrics, runtimeState]);
+
   const hlsUrl = streamHealth?.hlsUrl || fallbackHlsUrl;
 
   useEffect(() => {
@@ -161,107 +329,116 @@ export function StationConsole() {
   }, []);
 
   useEffect(() => {
-    let alive = true;
+    let disposed = false;
 
-    async function readHealth() {
-      try {
-        const response = await fetch(`${serverUrl}/health`, { cache: "no-store" });
-        if (!response.ok) {
-          return;
-        }
-
-        const json = (await response.json()) as {
-          listenerCount: number;
-          bytesIn: number;
-          chunkCount: number;
-          lastChunkAt: string | null;
-          relayPathReady?: boolean;
-          hlsUrl?: string;
-          relay?: unknown;
-          ingest?: unknown;
-          mp3Bridge?: unknown;
-        };
-
-        const hlsPath = typeof json.hlsUrl === "string" && json.hlsUrl
-          ? json.hlsUrl
-          : `/hls/${serverConfig.relayPath || "live"}/index.m3u8`;
-
-        if (alive) {
-          setStreamHealth({
-            listenerCount: json.listenerCount,
-            bytesIn: json.bytesIn,
-            chunkCount: json.chunkCount,
-            lastChunkAt: json.lastChunkAt,
-            relayPathReady: json.relayPathReady === true,
-            hlsUrl: hlsPath.startsWith("http")
-              ? hlsPath
-              : `${serverUrl}${hlsPath.startsWith("/") ? hlsPath : `/${hlsPath}`}`,
-            relay: normalizeProcessRuntime(json.relay),
-            ingest: normalizeProcessRuntime(json.ingest),
-            mp3Bridge: normalizeProcessRuntime(json.mp3Bridge),
-          });
-        }
-      } catch {
-        if (alive) {
-          setStreamHealth(null);
-        }
+    const refreshRuntimeState = async () => {
+      const current = getRuntimeStateSnapshot();
+      const persisted = await getPersistedRuntimeStateSnapshot();
+      const next = selectNewestRuntimeState(current, persisted);
+      if (!disposed) {
+        setRuntimeState(next);
       }
+    };
+
+    void refreshRuntimeState();
+    const onRuntimeStateEvent = () => {
+      void refreshRuntimeState();
+    };
+    window.addEventListener(RUNTIME_STATE_EVENT_NAME, onRuntimeStateEvent as EventListener);
+    const timer = window.setInterval(() => {
+      void refreshRuntimeState();
+    }, RUNTIME_STATE_POLL_MS);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener(RUNTIME_STATE_EVENT_NAME, onRuntimeStateEvent as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    const localConfig = readStoredConfig();
+    if (localConfig) {
+      setServerConfig(localConfig);
+      setSettingsStatus("Loaded local settings.");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!runtimeState) {
+      return;
     }
 
-    void readHealth();
+    const normalized = mapRuntimeConfigToServerConfig(runtimeState.config);
+    const signature = JSON.stringify(normalized);
+    if (runtimeConfigSignature.current === signature) {
+      return;
+    }
+    runtimeConfigSignature.current = signature;
+
+    setServerConfig(normalized);
+    writeStoredConfig(normalized);
+    setSettingsStatus("Synced from runtime.");
+    setSettingsError(null);
+  }, [runtimeState]);
+
+  const helperRunning = runtimeState?.processes.mp3Helper.running === true;
+  const relayRunning = runtimeState?.processes.mediamtx.running === true;
+
+  useEffect(() => {
+    if (!helperRunning && !relayRunning) {
+      setRelayMetrics(null);
+      return;
+    }
+
+    let alive = true;
+
+    async function readRelayHealth() {
+      const helperRequest: Promise<Mp3HelperStatusPayload | null> = helperRunning
+        ? fetch(helperStatusUrl, { cache: "no-store" })
+            .then(async (response) => {
+              if (!response.ok) {
+                return null;
+              }
+              return parseMp3HelperStatus(await response.json());
+            })
+            .catch(() => null)
+        : Promise.resolve(null);
+
+      const mediamtxRequest: Promise<MediaMtxPathPayload | null> = relayRunning
+        ? fetch(MEDIAMTX_CONTROL_API_URL, { cache: "no-store" })
+            .then(async (response) => {
+              if (!response.ok) {
+                return null;
+              }
+              return parseMediaMtxPath(await response.json(), relayPath);
+            })
+            .catch(() => null)
+        : Promise.resolve(null);
+
+      const [helperStatus, relayStatus] = await Promise.all([helperRequest, mediamtxRequest]);
+
+      if (!alive) {
+        return;
+      }
+
+      setRelayMetrics({
+        listenerCount: helperStatus?.listenerCount ?? 0,
+        relayPathReady: relayStatus?.ready ?? false,
+        relayBytesReceived: relayStatus?.bytesReceived ?? 0,
+      });
+    }
+
+    void readRelayHealth();
     const timer = window.setInterval(() => {
-      void readHealth();
+      void readRelayHealth();
     }, 5000);
 
     return () => {
       alive = false;
       window.clearInterval(timer);
     };
-  }, [serverUrl, serverConfig.relayPath]);
-
-  useEffect(() => {
-    let alive = true;
-    const localConfig = readStoredConfig();
-    if (localConfig) {
-      setServerConfig(localConfig);
-      setSettingsStatus("Loaded local settings.");
-    }
-
-    async function syncConfigFromServer() {
-      try {
-        const response = await fetch(`${serverUrl}/api/config`, { cache: "no-store" });
-        const json = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          const message = typeof (json as { error?: unknown }).error === "string"
-            ? (json as { error: string }).error
-            : `Config sync failed with status ${response.status}`;
-          throw new Error(message);
-        }
-
-        const normalized = normalizeServerConfig(json);
-        if (!alive) {
-          return;
-        }
-
-        setServerConfig(normalized);
-        writeStoredConfig(normalized);
-        setSettingsStatus("Synced with server config.");
-        setSettingsError(null);
-      } catch (error) {
-        if (!alive) {
-          return;
-        }
-        setSettingsStatus(localConfig ? "Using local settings." : "No local settings found.");
-        setSettingsError(error instanceof Error ? error.message : "Unable to sync config.");
-      }
-    }
-
-    void syncConfigFromServer();
-
-    return () => {
-      alive = false;
-    };
-  }, [serverUrl]);
+  }, [helperRunning, helperStatusUrl, relayPath, relayRunning]);
 
   function updateServerConfig(field: keyof ServerConfig, value: string) {
     setServerConfig((previous) => ({
@@ -274,30 +451,21 @@ export function StationConsole() {
     const payload = normalizeServerConfig(serverConfig);
     writeStoredConfig(payload);
     setIsSavingSettings(true);
-    setSettingsStatus("Saving settings...");
+    setSettingsStatus("Saving...");
     setSettingsError(null);
 
     try {
-      const response = await fetch(`${serverUrl}/api/config`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const json = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = typeof (json as { error?: unknown }).error === "string"
-          ? (json as { error: string }).error
-          : `Config save failed with status ${response.status}`;
-        throw new Error(message);
+      const updatedRuntimeState = await updateRuntimeConfig(mapServerConfigToRuntimeConfig(payload));
+      if (updatedRuntimeState) {
+        const normalized = mapRuntimeConfigToServerConfig(updatedRuntimeState.config);
+        runtimeConfigSignature.current = JSON.stringify(normalized);
+        setRuntimeState(updatedRuntimeState);
+        setServerConfig(normalized);
+        writeStoredConfig(normalized);
+        setSettingsStatus("Saved.");
+      } else {
+        setSettingsStatus("Saved locally only.");
       }
-
-      const normalized = normalizeServerConfig(json);
-      setServerConfig(normalized);
-      writeStoredConfig(normalized);
-      setSettingsStatus("Saved to localStorage and server.");
       setSettingsError(null);
     } catch (error) {
       setSettingsStatus("Save failed.");
@@ -307,6 +475,52 @@ export function StationConsole() {
     }
   }
 
+  function runCloudflareAction(action: "connect" | "retry" | "skip") {
+    setCloudflareActionPending(action);
+    setCloudflareActionError(null);
+
+    let pendingReleased = false;
+    const releasePending = () => {
+      if (pendingReleased) {
+        return;
+      }
+      pendingReleased = true;
+      setCloudflareActionPending(null);
+    };
+
+    const timeoutId = window.setTimeout(() => {
+      releasePending();
+    }, CLOUDFLARE_ACTION_PENDING_TIMEOUT_MS);
+
+    const actionPromise =
+      action === "connect"
+        ? requestCloudflareLogin()
+        : action === "retry"
+          ? retryCloudflareSetup()
+          : skipCloudflareForNow();
+
+    void actionPromise
+      .then((nextState) => {
+        if (nextState) {
+          setRuntimeState(nextState);
+          if (action !== "skip" && nextState.cloudflare.status !== "ready") {
+            throw new Error(
+              nextState.cloudflare.message || `Cloudflare setup is ${nextState.cloudflare.status}.`,
+            );
+          }
+        }
+      })
+      .catch((error) => {
+        setCloudflareActionError(
+          error instanceof Error ? error.message : "Unable to complete Cloudflare action.",
+        );
+      })
+      .finally(() => {
+        window.clearTimeout(timeoutId);
+        releasePending();
+      });
+  }
+
   const currentTimeLabel = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const currentDateLabel = now.toLocaleDateString([], {
     month: "short",
@@ -314,12 +528,16 @@ export function StationConsole() {
     year: "numeric",
   });
 
+  const runtimePhaseLabel = runtimeState?.phase?.toUpperCase() ?? "STARTING";
+  const relayReadyBadge = streamHealth?.relayPathReady ? "Ready" : "Pending";
+  const cloudflareBadge = runtimeState?.cloudflare.status ?? "pending-consent";
+
   return (
     <main className="h-screen overflow-hidden text-[hsl(var(--theme-text))]">
-      <section className="flex h-full w-full flex-col overflow-hidden border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))]">
+      <section className="relative flex h-full w-full flex-col overflow-hidden border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))]">
         <AppWindowChrome
-          appName="RelyyCast Control Plane"
-          subtitle="RelyyCast / Server GUI"
+          appName="RelyyCast"
+          subtitle="Desktop Control"
           darkMode={darkMode}
           currentTimeLabel={currentTimeLabel}
           currentDateLabel={currentDateLabel}
@@ -330,8 +548,8 @@ export function StationConsole() {
           }}
         />
 
-        <div className="flex-1 overflow-hidden">
-          <nav className="flex flex-wrap items-center gap-1 border-b border-[hsl(var(--theme-border))] px-2 py-1.5">
+        <nav className="shrink-0 border-b border-[hsl(var(--theme-border))] px-2 py-1.5">
+          <div className="flex items-center gap-1">
             {tabs.map((tab) => {
               const active = activeTab === tab.id;
               return (
@@ -342,65 +560,61 @@ export function StationConsole() {
                   title={tab.tip}
                   aria-pressed={active}
                   className={[
-                    "inline-flex h-7 items-center justify-center rounded-sm border px-2.5 text-[10px] font-semibold transition-colors",
+                    "inline-flex h-6 items-center justify-center rounded-sm border px-2 text-[9px] font-semibold transition-colors",
                     active
                       ? "border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-primary))] text-white"
-                      : "border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[hsl(var(--theme-text))] hover:bg-white/70 dark:hover:bg-white/5",
+                      : "border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] hover:bg-white/70 dark:hover:bg-white/5",
                   ].join(" ")}
                 >
                   {tab.label}
                 </button>
               );
             })}
-
-          </nav>
-
-          <div className="grid gap-2.5 p-2.5 grid-cols-[1fr_485px]">
-            <section className="space-y-2.5">
-              <Panel
-                eyebrow={tabMeta[activeTab].eyebrow}
-                title={tabMeta[activeTab].title}
-                body={tabMeta[activeTab].body}
-              >
-                {renderTab(activeTab, {
-                  streamUrl,
-                  hlsUrl,
-                  streamHealth,
-                  serverConfig,
-                  settingsStatus,
-                  settingsError,
-                  isSavingSettings,
-                  onSettingsFieldChange: updateServerConfig,
-                  onSaveSettings: () => {
-                    void saveServerConfig();
-                  },
-                })}
-              </Panel>
-            </section>
-
-            <aside className="space-y-2.5">
-              <Panel eyebrow="State" title="Core values" body="">
-                <div className="grid gap-1.5">
-                  {statsForView(streamUrl, hlsUrl).map((item) => (
-                    <ValueRow
-                      key={item.label}
-                      label={item.label}
-                      value={item.value}
-                    />
-                  ))}
-                </div>
-              </Panel>
-            </aside>
           </div>
+        </nav>
+
+        <div className="flex-1 overflow-hidden p-2">
+          {renderTab(activeTab, {
+            runtimeState,
+            streamUrl,
+            hlsUrl,
+            streamHealth,
+            serverConfig,
+            settingsStatus,
+            settingsError,
+            isSavingSettings,
+            cloudflareActionPending,
+            cloudflareActionError,
+            onRequestCloudflareLogin: () => {
+              void runCloudflareAction("connect");
+            },
+            onRetryCloudflareSetup: () => {
+              void runCloudflareAction("retry");
+            },
+            onSkipCloudflareForNow: () => {
+              void runCloudflareAction("skip");
+            },
+            onSettingsFieldChange: updateServerConfig,
+            onSaveSettings: () => {
+              void saveServerConfig();
+            },
+            onOpenSetupWizard: () => {
+              setShowSetupWizard(true);
+            },
+          })}
         </div>
 
+        {showSetupWizard ? (
+          <CloudflareSetupWizard onClose={() => { setShowSetupWizard(false); }} />
+        ) : null}
+
         <AppStatusFooter
-          leftStatusLabel="Bridge"
-          leftStatusValue="Desktop agent connected and stream endpoint reachable"
+          leftStatusLabel="Runtime"
+          leftStatusValue={runtimeState?.phase === "running" ? "Active" : "Starting"}
           badges={[
-            { label: "Live", value: "On" },
-            { label: "Agent", value: "Online" },
-            { label: "Settings", value: "Loaded" },
+            { label: "Phase", value: runtimePhaseLabel },
+            { label: "Relay", value: relayReadyBadge },
+            { label: "CF", value: cloudflareBadge },
           ]}
         />
       </section>
@@ -408,37 +622,10 @@ export function StationConsole() {
   );
 }
 
-const tabMeta: Record<TabId, { eyebrow: string; title: string; body: string | null }> = {
-  overview: {
-    eyebrow: "Overview",
-    title: "Station at a glance",
-    body: null,
-  },
-  stream: {
-    eyebrow: "Stream",
-    title: "Public MP3 + HLS endpoints",
-    body: "Playback, relay health, and process status.",
-  },
-  agent: {
-    eyebrow: "Agent",
-    title: "Desktop pairing and heartbeat",
-    body: "Pairing and health.",
-  },
-  settings: {
-    eyebrow: "Settings",
-    title: "Server runtime configuration",
-    body: "Local cache first, then sync to server config.",
-  },
-  log: {
-    eyebrow: "Log",
-    title: "Recent events",
-    body: "Recent events.",
-  },
-};
-
 function renderTab(
   tab: TabId,
   context: {
+    runtimeState: RuntimeState | null;
     streamUrl: string;
     hlsUrl: string;
     streamHealth: StreamHealth | null;
@@ -446,234 +633,250 @@ function renderTab(
     settingsStatus: string;
     settingsError: string | null;
     isSavingSettings: boolean;
+    cloudflareActionPending: "connect" | "retry" | "skip" | null;
+    cloudflareActionError: string | null;
+    onRequestCloudflareLogin: () => void;
+    onRetryCloudflareSetup: () => void;
+    onSkipCloudflareForNow: () => void;
     onSettingsFieldChange: (field: keyof ServerConfig, value: string) => void;
     onSaveSettings: () => void;
+    onOpenSetupWizard: () => void;
   },
 ) {
   switch (tab) {
-    case "overview":
+    case "control": {
+      const cloudflare = context.runtimeState?.cloudflare ?? null;
+      const runtimePhase = context.runtimeState?.phase?.toUpperCase() ?? "STARTING";
+      const cloudflareStatus = cloudflare?.status ?? "pending-consent";
+      const cloudflareMessage = cloudflare?.message ?? null;
+      const showRetry = cloudflare?.canRetry === true || cloudflare?.nextAction === "retry-cloudflare";
+      const isNamed = context.serverConfig.cloudflareMode === "named";
+      const hasBusyAction = context.cloudflareActionPending !== null;
+      const isProvisioning = cloudflareStatus === "provisioning";
+      const isConnectBusy = context.cloudflareActionPending === "connect";
+      const isRetryBusy = context.cloudflareActionPending === "retry";
+      const isSkipBusy = context.cloudflareActionPending === "skip";
+      const relayReady = context.streamHealth?.relayPathReady ? "Ready" : "Pending";
+      const listeners = String(context.streamHealth?.listenerCount ?? 0);
+      const errorMessage = context.cloudflareActionError ?? context.settingsError;
+      const statusMessage = cloudflareMessage ?? (context.settingsStatus !== "Waiting for runtime state." ? context.settingsStatus : null);
+
       return (
-        <div className="grid gap-1.5  grid-cols-2">
-          <MiniMetric
-            label="Live state"
-            value="Public bridge live"
-            tip="The web URL is up and the agent is online."
-          />
-          <MiniMetric
-            label="Agent state"
-            value="Heartbeat 12s ago"
-            tip="The desktop app is still sending health checks."
-          />
-          <MiniMetric
-            label="Soft limit"
-            value="64 listeners"
-            tip="A conservative listener target for the current bitrate."
-          />
-          <MiniMetric
-            label="Local port"
-            value="8177"
-            tip="The local MP3 origin listens here on the desktop machine."
-          />
-          <MiniMetric
-            label="Chunks in"
-            value={context.streamHealth ? String(context.streamHealth.chunkCount) : "offline"}
-            tip="How many encoded chunks reached the local stream origin."
-          />
-          <MiniMetric
-            label="Listeners"
-            value={context.streamHealth ? String(context.streamHealth.listenerCount) : "offline"}
-            tip="Current active listeners on the local stream origin."
-          />
+        <div className="grid h-full grid-cols-2 gap-2">
+          {/* Left: Cloudflare Controls */}
+          <div className="flex flex-col gap-1.5 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-2">
+            <div className="flex items-center justify-between">
+              <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Cloudflare</p>
+              {isNamed ? (
+                <button
+                  type="button"
+                  data-no-drag="true"
+                  onClick={context.onOpenSetupWizard}
+                  className="h-5 rounded-sm border border-[hsl(var(--theme-primary))] px-1.5 text-[8px] font-semibold text-[hsl(var(--theme-primary))] transition-colors hover:bg-[hsl(var(--theme-primary))] hover:text-white"
+                >
+                  Setup Guide
+                </button>
+              ) : null}
+            </div>
+
+            {/* Mode toggle */}
+            <div className="flex overflow-hidden rounded-sm border border-[hsl(var(--theme-border))]">
+              {(["temporary", "named"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => { context.onSettingsFieldChange("cloudflareMode", mode); }}
+                  className={[
+                    "flex-1 h-7 text-[9px] font-semibold transition-colors",
+                    context.serverConfig.cloudflareMode === mode
+                      ? "bg-[hsl(var(--theme-primary))] text-white"
+                      : "bg-[hsl(var(--theme-surface-alt))]",
+                  ].join(" ")}
+                >
+                  {mode === "temporary" ? "Temp URL" : "Custom Domain"}
+                </button>
+              ))}
+            </div>
+
+            {/* Hostname + Tunnel Name — always visible, disabled in temp mode */}
+            <div className="grid grid-cols-2 gap-1">
+              <ConfigField
+                label="Hostname"
+                value={context.serverConfig.cloudflareHostname}
+                disabled={!isNamed}
+                onChange={(value) => { context.onSettingsFieldChange("cloudflareHostname", value); }}
+              />
+              <ConfigField
+                label="Tunnel Name"
+                value={context.serverConfig.cloudflareTunnelName}
+                disabled={!isNamed}
+                onChange={(value) => { context.onSettingsFieldChange("cloudflareTunnelName", value); }}
+              />
+            </div>
+
+            {/* Save · Connect · Skip */}
+            <div className="grid grid-cols-3 gap-1">
+              <button
+                type="button"
+                onClick={context.onSaveSettings}
+                disabled={context.isSavingSettings}
+                className="h-7 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-60"
+              >
+                {context.isSavingSettings ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={context.onRequestCloudflareLogin}
+                disabled={hasBusyAction || isProvisioning}
+                className="h-7 rounded-sm border border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-primary))] text-[9px] font-semibold text-white disabled:opacity-60"
+              >
+                {isConnectBusy ? "Connecting…" : "Connect"}
+              </button>
+              <button
+                type="button"
+                onClick={context.onSkipCloudflareForNow}
+                disabled={hasBusyAction || isProvisioning || cloudflareStatus === "ready"}
+                className="h-7 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-60"
+              >
+                {isSkipBusy ? "Skipping…" : "Skip"}
+              </button>
+            </div>
+
+            {/* Retry — always rendered, disabled when not applicable */}
+            <button
+              type="button"
+              onClick={context.onRetryCloudflareSetup}
+              disabled={hasBusyAction || isProvisioning || !showRetry}
+              className="h-7 w-full rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-40"
+            >
+              {isRetryBusy ? "Retrying…" : "Retry Setup"}
+            </button>
+
+            {statusMessage ? (
+              <div className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1 text-[9px] text-[hsl(var(--theme-muted))]">
+                {statusMessage}
+              </div>
+            ) : null}
+
+            {errorMessage ? (
+              <div className="rounded-sm border border-red-500/50 bg-red-500/10 px-2 py-1 text-[9px] text-red-600 dark:text-red-300">
+                <span>{errorMessage}</span>
+                {isNamed ? (
+                  <button
+                    type="button"
+                    data-no-drag="true"
+                    onClick={context.onOpenSetupWizard}
+                    className="ml-2 font-semibold underline underline-offset-2 hover:no-underline"
+                  >
+                    View setup guide →
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
+          {/* Right: Status + Stream */}
+          <div className="flex flex-col gap-1.5 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-2">
+            <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Status</p>
+
+            <div className="grid grid-cols-2 gap-1">
+              <StatusTile label="Runtime" value={runtimePhase} />
+              <StatusTile label="Cloudflare" value={cloudflareStatus.toUpperCase()} />
+              <StatusTile label="Relay" value={relayReady} />
+              <StatusTile label="Listeners" value={listeners} />
+            </div>
+
+            <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Stream</p>
+
+            <UrlRow
+              label="MP3"
+              value={context.streamUrl}
+              onCopy={() => { void navigator.clipboard.writeText(context.streamUrl); }}
+            />
+            <UrlRow
+              label="HLS"
+              value={context.hlsUrl}
+              onCopy={() => { void navigator.clipboard.writeText(context.hlsUrl); }}
+            />
+
+            <div className="grid grid-cols-2 gap-1">
+              <ActionButton onClick={() => { window.open(context.streamUrl, "_blank", "noopener,noreferrer"); }}>
+                Open MP3
+              </ActionButton>
+              <ActionButton onClick={() => { window.open(context.hlsUrl, "_blank", "noopener,noreferrer"); }}>
+                Open HLS
+              </ActionButton>
+            </div>
+          </div>
         </div>
       );
-    case "stream":
-      return (
-        <div className="space-y-1.5">
-          <ValueRow label="MP3 URL" value={context.streamUrl} />
-          <ValueRow label="HLS URL" value={context.hlsUrl} />
-          <div className="grid gap-1.5 sm:grid-cols-4">
-            <ActionButton
-              tip="Copy the public MP3 URL to your clipboard."
-              onClick={() => {
-                void navigator.clipboard.writeText(context.streamUrl);
-              }}
-            >
-              Copy MP3
-            </ActionButton>
-            <ActionButton
-              tip="Open the MP3 URL in a new player or browser tab."
-              onClick={() => {
-                window.open(context.streamUrl, "_blank", "noopener,noreferrer");
-              }}
-            >
-              Open MP3
-            </ActionButton>
-            <ActionButton
-              tip="Open the proxied HLS playlist."
-              onClick={() => {
-                window.open(context.hlsUrl, "_blank", "noopener,noreferrer");
-              }}
-            >
-              Open HLS
-            </ActionButton>
-            <ActionButton
-              tip="Read local health to verify the relay and bridge are reachable."
-              onClick={() => {
-                window.open(`${context.streamUrl.replace("/live.mp3", "")}/health`, "_blank", "noopener,noreferrer");
-              }}
-            >
-              Open health
-            </ActionButton>
-          </div>
-          <div className="grid gap-1.5 sm:grid-cols-3">
-            <ValueRow
-              label="Listeners"
-              value={context.streamHealth ? String(context.streamHealth.listenerCount) : "unavailable"}
-            />
-            <ValueRow
-              label="Chunks received"
-              value={context.streamHealth ? String(context.streamHealth.chunkCount) : "unavailable"}
-            />
-            <ValueRow
-              label="Bytes ingested"
-              value={context.streamHealth ? String(context.streamHealth.bytesIn) : "unavailable"}
-            />
-            <ValueRow
-              label="Relay path"
-              value={context.streamHealth?.relayPathReady ? "ready" : "pending"}
-            />
-            <ValueRow
-              label="Relay process"
-              value={formatProcessState(context.streamHealth?.relay)}
-            />
-            <ValueRow
-              label="Ingest process"
-              value={formatProcessState(context.streamHealth?.ingest)}
-            />
-            <ValueRow
-              label="MP3 bridge"
-              value={formatProcessState(context.streamHealth?.mp3Bridge)}
-            />
-            <ValueRow
-              label="Last chunk"
-              value={
-                context.streamHealth?.lastChunkAt
-                  ? new Date(context.streamHealth.lastChunkAt).toLocaleTimeString()
-                  : "unavailable"
-              }
-            />
-          </div>
-          <div className="rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2.5 py-2 text-[12px] leading-5 text-[hsl(var(--theme-muted))]">
-            The stream stays public while the encoder and tunnel run locally. If the desktop
-            app stops, the station stops.
-          </div>
-        </div>
-      );
-    case "agent":
-      return <AgentOperationsPanel />;
+    }
     case "settings":
       return (
-        <div className="space-y-1.5">
-          <ConfigField
-            label="Input URL"
-            value={context.serverConfig.inputUrl}
-            placeholder="http://127.0.0.1:4850/live.mp3"
-            onChange={(value) => {
-              context.onSettingsFieldChange("inputUrl", value);
-            }}
-          />
-          <ConfigField
-            label="Station Name"
-            value={context.serverConfig.stationName}
-            placeholder="RelyyCast Dev Stream"
-            onChange={(value) => {
-              context.onSettingsFieldChange("stationName", value);
-            }}
-          />
-          <ConfigField
-            label="Genre"
-            value={context.serverConfig.genre}
-            placeholder="Various"
-            onChange={(value) => {
-              context.onSettingsFieldChange("genre", value);
-            }}
-          />
-          <ConfigField
-            label="Description"
-            value={context.serverConfig.description}
-            placeholder="Local FFmpeg test source"
-            onChange={(value) => {
-              context.onSettingsFieldChange("description", value);
-            }}
-          />
-          <ConfigField
-            label="Bitrate"
-            value={context.serverConfig.bitrate}
-            placeholder="128k"
-            onChange={(value) => {
-              context.onSettingsFieldChange("bitrate", value);
-            }}
-          />
-          <ConfigField
-            label="FFmpeg Path"
-            value={context.serverConfig.ffmpegPath}
-            placeholder="C:\\ffmpeg\\bin\\ffmpeg.exe"
-            onChange={(value) => {
-              context.onSettingsFieldChange("ffmpegPath", value);
-            }}
-          />
-          <ConfigField
-            label="Relay Path"
-            value={context.serverConfig.relayPath}
-            placeholder="live"
-            onChange={(value) => {
-              context.onSettingsFieldChange("relayPath", value);
-            }}
-          />
-          <ConfigField
-            label="MediaMTX Path"
-            value={context.serverConfig.mediamtxPath}
-            placeholder="mediamtx\\win\\mediamtx.exe"
-            onChange={(value) => {
-              context.onSettingsFieldChange("mediamtxPath", value);
-            }}
-          />
-          <ConfigField
-            label="MediaMTX Config Path"
-            value={context.serverConfig.mediamtxConfigPath}
-            placeholder="mediamtx\\mediamtx.yml"
-            onChange={(value) => {
-              context.onSettingsFieldChange("mediamtxConfigPath", value);
-            }}
-          />
-          <button
-            type="button"
-            onClick={context.onSaveSettings}
-            disabled={context.isSavingSettings}
-            className="h-8 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[11px] font-semibold hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-white/5"
-          >
-            {context.isSavingSettings ? "Saving..." : "Save settings"}
-          </button>
-          <div className="rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2.5 py-2 text-[12px] leading-5 text-[hsl(var(--theme-muted))]">
-            <p>{context.settingsStatus}</p>
-            {context.settingsError ? <p className="text-red-500">Error: {context.settingsError}</p> : null}
+        <div className="flex h-full flex-col gap-2 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-2">
+          <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Configuration</p>
+
+          <div className="grid grid-cols-3 gap-1.5">
+            <ConfigField
+              label="Input URL"
+              value={context.serverConfig.inputUrl}
+              onChange={(value) => { context.onSettingsFieldChange("inputUrl", value); }}
+            />
+            <ConfigField
+              label="Station Name"
+              value={context.serverConfig.stationName}
+              onChange={(value) => { context.onSettingsFieldChange("stationName", value); }}
+            />
+            <ConfigField
+              label="Bitrate"
+              value={context.serverConfig.bitrate}
+              onChange={(value) => { context.onSettingsFieldChange("bitrate", value); }}
+            />
+            <ConfigField
+              label="Relay Path"
+              value={context.serverConfig.relayPath}
+              onChange={(value) => { context.onSettingsFieldChange("relayPath", value); }}
+            />
+            <ConfigField
+              label="Genre"
+              value={context.serverConfig.genre}
+              onChange={(value) => { context.onSettingsFieldChange("genre", value); }}
+            />
+            <ConfigField
+              label="Description"
+              value={context.serverConfig.description}
+              onChange={(value) => { context.onSettingsFieldChange("description", value); }}
+            />
+            <ConfigField
+              label="FFmpeg Path"
+              value={context.serverConfig.ffmpegPath}
+              onChange={(value) => { context.onSettingsFieldChange("ffmpegPath", value); }}
+            />
+            <ConfigField
+              label="MediaMTX Path"
+              value={context.serverConfig.mediamtxPath}
+              onChange={(value) => { context.onSettingsFieldChange("mediamtxPath", value); }}
+            />
+            <ConfigField
+              label="MediaMTX Config"
+              value={context.serverConfig.mediamtxConfigPath}
+              onChange={(value) => { context.onSettingsFieldChange("mediamtxConfigPath", value); }}
+            />
           </div>
-        </div>
-      );
-    case "log":
-      return (
-        <div className="space-y-1.5">
-          {events.map((event, index) => (
-            <div
-              key={event}
-              className="flex items-start gap-2.5 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2.5 py-2"
+
+          <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-1">
+            <button
+              type="button"
+              onClick={context.onSaveSettings}
+              disabled={context.isSavingSettings}
+              className="h-7 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-60"
             >
-              <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-[hsl(var(--theme-muted))]">
-                0{index + 1}
-              </span>
-              <p className="text-[12px] leading-5">{event}</p>
+              {context.isSavingSettings ? "Saving…" : "Save Settings"}
+            </button>
+            <div className="truncate rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-1.5 py-1 text-[9px] text-[hsl(var(--theme-muted))]">
+              {context.settingsError ? `Error: ${context.settingsError}` : context.settingsStatus}
             </div>
-          ))}
+          </div>
         </div>
       );
     default:
@@ -681,46 +884,34 @@ function renderTab(
   }
 }
 
-function Panel({
-  eyebrow,
-  title,
-  body,
-  children,
-}: Readonly<{
-  eyebrow: string;
-  title: string;
-  body: string | null;
-  children: React.ReactNode;
-}>) {
+function StatusTile({
+  label,
+  value,
+}: Readonly<{ label: string; value: string }>) {
   return (
-    <div className="rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-2.5">
-      <div className="flex items-center gap-1.5">
-        <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">
-          {eyebrow}
-        </p>
-      </div>
-      <h2 className="mt-1 text-[12px] font-semibold leading-4">{title}</h2>
-      {body ? (
-        <p className="mt-1 text-[11px] leading-4 text-[hsl(var(--theme-muted))]">{body}</p>
-      ) : null}
-      <div className="mt-2.5">{children}</div>
+    <div className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1">
+      <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-[hsl(var(--theme-muted))]">{label}</p>
+      <p className="mt-0.5 truncate text-[10px]" title={value}>{value}</p>
     </div>
   );
 }
 
-function ValueRow({
+function UrlRow({
   label,
   value,
-}: Readonly<{
-  label: string;
-  value: string;
-}>) {
+  onCopy,
+}: Readonly<{ label: string; value: string; onCopy: () => void }>) {
   return (
-    <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2.5 py-1.5">
-      <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-[hsl(var(--theme-muted))]">
-        {label}
-      </span>
-      <span className="min-w-0 break-all text-right font-mono text-[12px] leading-5">{value}</span>
+    <div className="grid grid-cols-[32px_minmax(0,1fr)_48px] items-center gap-1 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-1.5 py-1">
+      <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[hsl(var(--theme-muted))]">{label}</span>
+      <span className="truncate font-mono text-[9px]" title={value}>{value}</span>
+      <button
+        type="button"
+        onClick={onCopy}
+        className="h-5 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] text-[8px] font-semibold"
+      >
+        Copy
+      </button>
     </div>
   );
 }
@@ -728,103 +919,154 @@ function ValueRow({
 function ConfigField({
   label,
   value,
-  placeholder,
   onChange,
+  disabled = false,
 }: Readonly<{
   label: string;
   value: string;
-  placeholder?: string;
   onChange: (value: string) => void;
+  disabled?: boolean;
 }>) {
   return (
-    <label className="grid gap-1 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2.5 py-2">
-      <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-[hsl(var(--theme-muted))]">
-        {label}
-      </span>
+    <label className={["grid gap-0.5 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-1.5 py-1", disabled ? "opacity-50" : ""].join(" ")}>
+      <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[hsl(var(--theme-muted))]">{label}</span>
       <input
         type="text"
         value={value}
-        placeholder={placeholder}
-        onChange={(event) => {
-          onChange(event.target.value);
-        }}
-        className="h-8 rounded-sm border border-[hsl(var(--theme-border))] bg-white px-2 text-[12px] leading-5 outline-none ring-0 transition-colors focus:border-[hsl(var(--theme-primary))] dark:bg-[hsl(var(--theme-surface))]"
+        disabled={disabled}
+        onChange={(event) => { onChange(event.target.value); }}
+        className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-white px-1.5 text-[10px] leading-4 outline-none focus:border-[hsl(var(--theme-primary))] disabled:cursor-not-allowed dark:bg-[hsl(var(--theme-surface))]"
       />
     </label>
   );
 }
 
-function MiniMetric({
-  label,
-  value,
-  tip,
-}: Readonly<{
-  label: string;
-  value: string;
-  tip: string;
-}>) {
-  return (
-    <div className="rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2.5 py-1.5">
-      <div className="flex items-center gap-1.5">
-        <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-[hsl(var(--theme-muted))]">
-          {label}
-        </span>
-      </div>
-      <p className="mt-1 text-[12px] leading-5" title={tip}>
-        {value}
-      </p>
-    </div>
-  );
-}
-
 function ActionButton({
   children,
-  tip,
   onClick,
 }: Readonly<{
   children: React.ReactNode;
-  tip: string;
   onClick?: () => void;
 }>) {
   return (
     <button
       type="button"
-      title={tip}
       onClick={onClick}
-      className="inline-flex h-8 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-white px-3 text-[11px] font-semibold transition-colors hover:bg-slate-50 dark:bg-[hsl(var(--theme-surface-alt))] dark:hover:bg-white/5"
+      className="inline-flex h-7 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-1.5 text-[9px] font-semibold"
     >
       {children}
     </button>
   );
 }
 
-function formatProcessState(process: ProcessRuntime | undefined) {
-  if (!process) {
-    return "unavailable";
-  }
+type WizardStep = {
+  number: number;
+  title: string;
+  body: string;
+  linkLabel?: string;
+  linkUrl?: string;
+};
 
-  if (process.running) {
-    return "running";
-  }
+const WIZARD_STEPS: WizardStep[] = [
+  {
+    number: 1,
+    title: "Add domain to Cloudflare",
+    body: "Your domain must be managed by Cloudflare DNS. Log in and add your site if you haven't already.",
+    linkLabel: "Cloudflare Dashboard →",
+    linkUrl: "https://dash.cloudflare.com",
+  },
+  {
+    number: 2,
+    title: "Create a tunnel in Zero Trust",
+    body: "Go to Networks → Tunnels → Create a tunnel. Choose Cloudflared as the connector type.",
+    linkLabel: "Zero Trust Dashboard →",
+    linkUrl: "https://one.dash.cloudflare.com/",
+  },
+  {
+    number: 3,
+    title: "Name your tunnel",
+    body: "Give the tunnel a name (e.g. relyycast-local). Copy it exactly into the Tunnel Name field in this panel.",
+  },
+  {
+    number: 4,
+    title: "Add a public hostname",
+    body: "In the tunnel wizard, add a public hostname (e.g. radio.yourdomain.com) pointing to HTTP → localhost:8177. That value is your Hostname.",
+  },
+  {
+    number: 5,
+    title: "Enter credentials and connect",
+    body: "Fill in Hostname and Tunnel Name above, click Save, then click Connect. Your browser will open for cloudflared authentication with Cloudflare.",
+  },
+];
 
-  if (process.lastError) {
-    return `error (${process.lastError})`;
-  }
+function CloudflareSetupWizard({ onClose }: Readonly<{ onClose: () => void }>) {
+  return (
+    <div
+      data-no-drag="true"
+      className="absolute inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        className="w-145 max-h-90 overflow-y-auto rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-3 shadow-lg"
+        onClick={(e) => { e.stopPropagation(); }}
+      >
+        <div className="mb-2.5 flex items-center justify-between">
+          <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">
+            Cloudflare Setup Guide
+          </p>
+          <button
+            type="button"
+            data-no-drag="true"
+            onClick={onClose}
+            className="inline-flex h-5 w-5 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[10px] font-bold transition-colors hover:border-[hsl(var(--theme-primary))] hover:bg-[hsl(var(--theme-primary))] hover:text-white"
+          >
+            ×
+          </button>
+        </div>
 
-  if (process.lastExitCode !== null) {
-    return `stopped (${process.lastExitCode})`;
-  }
-
-  return "stopped";
+        <div className="grid grid-cols-2 gap-2">
+          {WIZARD_STEPS.slice(0, 4).map((step) => (
+            <WizardStepCard key={step.number} step={step} />
+          ))}
+          <div className="col-span-2">
+            <WizardStepCard step={WIZARD_STEPS[4]} highlight />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-function statsForView(streamUrl: string, hlsUrl: string) {
-  return [
-    { label: "MP3 URL", value: streamUrl },
-    { label: "HLS URL", value: hlsUrl },
-    { label: "Default host", value: "wxyz.stream.relyycast.com" },
-    { label: "Input", value: "BlackHole 2ch" },
-    { label: "Relay", value: "MediaMTX + MP3 bridge" },
-  ];
+function WizardStepCard({
+  step,
+  highlight = false,
+}: Readonly<{ step: WizardStep; highlight?: boolean }>) {
+  return (
+    <div
+      className={[
+        "flex flex-col gap-1 rounded-sm border p-2",
+        highlight
+          ? "border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-surface-alt))]"
+          : "border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))]",
+      ].join(" ")}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm bg-[hsl(var(--theme-primary))] text-[8px] font-black text-white">
+          {step.number}
+        </span>
+        <p className="text-[9px] font-bold leading-tight">{step.title}</p>
+      </div>
+      <p className="text-[9px] leading-4 text-[hsl(var(--theme-muted))]">{step.body}</p>
+      {step.linkUrl ? (
+        <button
+          type="button"
+          data-no-drag="true"
+          onClick={() => { window.open(step.linkUrl, "_blank", "noopener,noreferrer"); }}
+          className="mt-auto self-start text-[8px] font-semibold text-[hsl(var(--theme-primary))] underline underline-offset-2 hover:no-underline"
+        >
+          {step.linkLabel}
+        </button>
+      ) : null}
+    </div>
+  );
 }
-

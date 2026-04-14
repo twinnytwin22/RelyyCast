@@ -20,6 +20,7 @@
 /mediamtx/mac
 # production
 /build
+/runtime/bun-mp3-helper/dist/
 
 # misc
 .DS_Store

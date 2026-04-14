@@ -1,208 +1,269 @@
+import { useState, type ReactNode } from "react";
+import { Link2, RotateCcw, SkipForward } from "lucide-react";
+import { type RuntimeState } from "@/src/runtime/neutralino-runtime-orchestrator";
 
-
-import { useMemo, useState } from "react";
-
-type PairStartResponse = {
-  pairingId: string;
-  pairingCode: string;
-  stationId: string;
-  status: string;
-  expiresAt: string;
+type Props = {
+  runtimeState: RuntimeState | null;
+  publicMp3Url: string;
+  helperStatusUrl: string;
+  isCloudflareActionPending: "connect" | "retry" | "skip" | null;
+  cloudflareActionError: string | null;
+  onRequestCloudflareLogin: () => void;
+  onRetryCloudflareSetup: () => void;
+  onSkipCloudflareForNow: () => void;
+  onOpenCloudflareSettings: () => void;
 };
 
-type PairStatusResponse = {
-  status: string;
-  stationId: string;
-  expiresAt?: string;
-  agentConfig?: {
-    localPort: number;
-    streamPath: string;
-    healthPath: string;
-    tunnelToken: string;
-  };
-};
+export default function AgentOperationsPanel({
+  runtimeState,
+  publicMp3Url,
+  helperStatusUrl,
+  isCloudflareActionPending,
+  cloudflareActionError,
+  onRequestCloudflareLogin,
+  onRetryCloudflareSetup,
+  onSkipCloudflareForNow,
+  onOpenCloudflareSettings,
+}: Readonly<Props>) {
+  const [showConsentDialog, setShowConsentDialog] = useState(false);
 
-type HeartbeatResponse = {
-  ok: boolean;
-  heartbeat: {
-    stationId: string;
-    agentId: string;
-    status: string;
-    encoderStatus: string;
-    tunnelStatus: string;
-    listenerCount: number;
-    localPort: number;
-    lastSeenAt: string;
-  };
-};
+  const runtimePhase = runtimeState?.phase ?? "starting";
+  const cloudflareMode = runtimeState?.config.cloudflareMode ?? "temporary";
+  const configuredHostname = runtimeState?.config.cloudflareHostname?.trim() ?? "";
+  const usesNamedTunnel = cloudflareMode === "named";
+  const requiresHostnameConfiguration = usesNamedTunnel && configuredHostname.length === 0;
+  const cloudflare = runtimeState?.cloudflare ?? null;
+  const publicUrl = cloudflare?.publicUrl ?? "";
+  const hasPublicUrl = /^https?:\/\//i.test(publicUrl);
+  const cloudflareStatus = cloudflare?.status ?? "pending-consent";
+  const cloudflareHostname = cloudflare?.hostname ?? "Not configured";
+  const cloudflarePublicUrl = cloudflare?.publicUrl ?? "Not available";
+  const showRetry = cloudflare?.canRetry === true || cloudflare?.nextAction === "retry-cloudflare";
+  const connectTitle = requiresHostnameConfiguration
+    ? "Configure Cloudflare Domain"
+    : cloudflareStatus === "ready"
+      ? usesNamedTunnel
+        ? "Reconnect Cloudflare"
+        : "Refresh Temporary URL"
+    : usesNamedTunnel
+      ? "Connect Cloudflare"
+      : "Start Temporary URL";
+  const consentTitle = usesNamedTunnel ? "Consent required" : "Temporary public URL";
+  const consentBody = usesNamedTunnel
+    ? "Run Cloudflare login and open browser auth for your configured hostname."
+    : "Start a temporary trycloudflare.com URL. No Cloudflare domain is required.";
+  const confirmLabel = usesNamedTunnel ? "Continue" : "Start URL";
 
-const SERVER_BASE = import.meta.env.VITE_SERVER_URL ?? "http://127.0.0.1:8177";
-
-async function postJson<T>(path: string, payload: Record<string, unknown>) {
-  const response = await fetch(`${SERVER_BASE}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const json = (await response.json().catch(() => ({}))) as T & { error?: string };
-  if (!response.ok) {
-    throw new Error(json.error ?? `Request failed with status ${response.status}`);
-  }
-
-  return json;
-}
-
-export default function AgentOperationsPanel() {
-  const [pairingCode, setPairingCode] = useState("");
-  const [pairingStatus, setPairingStatus] = useState("idle");
-  const [pairingExpiry, setPairingExpiry] = useState<string | null>(null);
-  const [lastHeartbeat, setLastHeartbeat] = useState<string | null>(null);
-  const [lastError, setLastError] = useState<string | null>(null);
-  const [isWorking, setIsWorking] = useState(false);
-
-  const stationId = "station-dev";
-  const agentId = "agent-local-dev";
-
-  const healthLabel = useMemo(() => {
-    if (!lastHeartbeat) {
-      return "No heartbeat sent yet";
-    }
-
-    return `Heartbeat sent ${new Date(lastHeartbeat).toLocaleTimeString()}`;
-  }, [lastHeartbeat]);
-
-  async function startPairing() {
-    setIsWorking(true);
-    setLastError(null);
-    try {
-      const result = await postJson<PairStartResponse>("/api/desktop/pair/start", {
-        stationId,
-        platform: "web",
-        appVersion: "0.1.0",
-        deviceName: "Console UI",
-      });
-
-      setPairingCode(result.pairingCode);
-      setPairingStatus(result.status);
-      setPairingExpiry(result.expiresAt);
-    } catch (error) {
-      setLastError(error instanceof Error ? error.message : "Unable to start pairing");
-    } finally {
-      setIsWorking(false);
-    }
-  }
-
-  async function approvePairing() {
-    if (!pairingCode) {
-      setLastError("Start pairing first");
-      return;
-    }
-
-    setIsWorking(true);
-    setLastError(null);
-    try {
-      const result = await postJson<{ status: string }>("/api/desktop/pair/approve", { pairingCode });
-      setPairingStatus(result.status);
-    } catch (error) {
-      setLastError(error instanceof Error ? error.message : "Unable to approve pairing");
-    } finally {
-      setIsWorking(false);
-    }
-  }
-
-  async function pollPairingStatus() {
-    if (!pairingCode) {
-      setLastError("Start pairing first");
-      return;
-    }
-
-    setIsWorking(true);
-    setLastError(null);
-    try {
-      const result = await postJson<PairStatusResponse>("/api/desktop/pair/status", { pairingCode });
-      setPairingStatus(result.status);
-      if (result.expiresAt) {
-        setPairingExpiry(result.expiresAt);
-      }
-    } catch (error) {
-      setLastError(error instanceof Error ? error.message : "Unable to poll pairing status");
-    } finally {
-      setIsWorking(false);
-    }
-  }
-
-  async function sendHeartbeat() {
-    setIsWorking(true);
-    setLastError(null);
-    try {
-      const result = await postJson<HeartbeatResponse>("/api/desktop/heartbeat", {
-        stationId,
-        agentId,
-        status: "online",
-        encoderStatus: "running",
-        tunnelStatus: "connected",
-        listenerCount: Math.floor(Math.random() * 5),
-        localPort: 8177,
-      });
-
-      setLastHeartbeat(result.heartbeat.lastSeenAt);
-    } catch (error) {
-      setLastError(error instanceof Error ? error.message : "Unable to send heartbeat");
-    } finally {
-      setIsWorking(false);
-    }
-  }
+  const isConnectBusy = isCloudflareActionPending === "connect";
+  const isRetryBusy = isCloudflareActionPending === "retry";
+  const isSkipBusy = isCloudflareActionPending === "skip";
+  const hasBusyAction = isCloudflareActionPending !== null;
+  const isProvisioning = cloudflareStatus === "provisioning";
 
   return (
-    <div className="space-y-2.5">
-      <div className="grid gap-1.5 sm:grid-cols-2">
-        <Metric label="Station" value={stationId} />
-        <Metric label="Agent" value={agentId} />
-        <Metric label="Pair code" value={pairingCode || "Not issued"} />
-        <Metric label="Pair status" value={pairingStatus.toUpperCase()} />
+    <div className="space-y-1.5">
+      <div className="grid grid-cols-2 gap-1">
+        <IconActionButton
+          title={isConnectBusy ? "Connecting..." : connectTitle}
+          onClick={() => {
+            if (requiresHostnameConfiguration) {
+              onOpenCloudflareSettings();
+              return;
+            }
+            setShowConsentDialog(true);
+          }}
+          disabled={hasBusyAction || isProvisioning}
+          icon={<Link2 size={14} />}
+        />
+        <IconActionButton
+          title={isSkipBusy ? "Skipping..." : "Skip Cloudflare for now"}
+          onClick={onSkipCloudflareForNow}
+          disabled={hasBusyAction || isProvisioning || cloudflareStatus === "ready"}
+          icon={<SkipForward size={14} />}
+        />
+        {showRetry ? (
+          <div className="col-span-2">
+            <IconActionButton
+              title={isRetryBusy ? "Retrying..." : "Retry Cloudflare setup"}
+              onClick={onRetryCloudflareSetup}
+              disabled={hasBusyAction || isProvisioning}
+              icon={<RotateCcw size={14} />}
+              fullWidth
+            />
+          </div>
+        ) : null}
       </div>
 
-      <div className="grid gap-1.5 sm:grid-cols-2">
-        <button type="button" onClick={() => void startPairing()} disabled={isWorking} className="h-8 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[11px] font-semibold hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-white/5">
-          Start pairing
-        </button>
-        <button type="button" onClick={() => void approvePairing()} disabled={isWorking || !pairingCode} className="h-8 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[11px] font-semibold hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-white/5">
-          Approve code
-        </button>
-        <button type="button" onClick={() => void pollPairingStatus()} disabled={isWorking || !pairingCode} className="h-8 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[11px] font-semibold hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-white/5">
-          Poll status
-        </button>
-        <button type="button" onClick={() => void sendHeartbeat()} disabled={isWorking} className="h-8 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[11px] font-semibold hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-60 dark:hover:bg-white/5">
-          Send heartbeat
-        </button>
+      {showConsentDialog ? (
+        <div className="space-y-1 rounded-sm border border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1.5 text-[10px] leading-4">
+          <p className="font-semibold">{consentTitle}</p>
+          <p className="text-[hsl(var(--theme-muted))]">{consentBody}</p>
+          <div className="grid grid-cols-2 gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                setShowConsentDialog(false);
+              }}
+              className="h-7 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[10px] font-semibold"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowConsentDialog(false);
+                onRequestCloudflareLogin();
+              }}
+              className="h-7 rounded-sm border border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-primary))] text-[10px] font-semibold text-white"
+            >
+              {confirmLabel}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-1">
+        <StatusTile label="Runtime" value={runtimePhase.toUpperCase()} />
+        <StatusTile label="Cloudflare" value={cloudflareStatus.toUpperCase()} />
+        <StatusTile label="Hostname" value={cloudflareHostname} mono />
+        <StatusTile label="Public URL" value={cloudflarePublicUrl} mono />
       </div>
 
-      <div className="rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2.5 py-2 text-[12px] leading-5 text-[hsl(var(--theme-muted))]">
-        <p>API base: {SERVER_BASE}</p>
-        <p>{healthLabel}</p>
-        {pairingExpiry ? <p>Pairing expires: {new Date(pairingExpiry).toLocaleTimeString()}</p> : null}
-        {lastError ? <p className="text-red-500">Error: {lastError}</p> : null}
-      </div>
+      {cloudflare?.message ? (
+        <div className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1 text-[10px] text-[hsl(var(--theme-muted))]">
+          {cloudflare.message}
+        </div>
+      ) : null}
+
+      {cloudflareActionError ? (
+        <div className="rounded-sm border border-red-500/50 bg-red-500/10 px-2 py-1 text-[10px] text-red-600 dark:text-red-300">
+          {cloudflareActionError}
+        </div>
+      ) : null}
+
+      <details className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1">
+        <summary className="cursor-pointer text-[10px] font-semibold">Details</summary>
+        <div className="mt-1 space-y-1">
+          <DetailRow label="Mode" value={usesNamedTunnel ? "Custom Domain" : "Temporary URL"} />
+          <DetailRow label="Tunnel" value={cloudflare?.tunnelName ?? "Not set"} />
+          <DetailRow label="Tunnel ID" value={cloudflare?.tunnelId ?? "Not set"} mono />
+          <DetailRow label="Last Attempt" value={cloudflare?.lastAttemptAt ?? "Never"} mono />
+          <div className={["gap-1 pt-1", hasPublicUrl ? "grid grid-cols-2" : "grid grid-cols-2"].join(" ")}>
+            {hasPublicUrl ? (
+              <>
+                <button
+                  type="button"
+                  title="Copy Cloudflare URL"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(publicUrl);
+                  }}
+                  className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] text-[9px] font-semibold"
+                >
+                  Copy URL
+                </button>
+                <button
+                  type="button"
+                  title="Open Cloudflare URL"
+                  onClick={() => {
+                    window.open(publicUrl, "_blank", "noopener,noreferrer");
+                  }}
+                  className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] text-[9px] font-semibold"
+                >
+                  Open URL
+                </button>
+              </>
+            ) : null}
+            <button
+              type="button"
+              title="Copy public MP3 URL"
+              onClick={() => {
+                void navigator.clipboard.writeText(publicMp3Url);
+              }}
+              className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] text-[9px] font-semibold"
+            >
+              Copy MP3
+            </button>
+            <button
+              type="button"
+              title="Open helper status"
+              onClick={() => {
+                window.open(helperStatusUrl, "_blank", "noopener,noreferrer");
+              }}
+              className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] text-[9px] font-semibold"
+            >
+              Helper
+            </button>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }
 
-function Metric({
+function StatusTile({
   label,
   value,
+  mono = false,
 }: Readonly<{
   label: string;
   value: string;
+  mono?: boolean;
 }>) {
   return (
-    <div className="rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2.5 py-1.5">
-      <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-[hsl(var(--theme-muted))]">
-        {label}
-      </span>
-      <p className="mt-1 break-all font-mono text-[12px] leading-5">{value}</p>
+    <div className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1">
+      <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-[hsl(var(--theme-muted))]">{label}</p>
+      <p className={["mt-0.5 truncate text-[10px]", mono ? "font-mono" : ""].join(" ")} title={value}>
+        {value}
+      </p>
     </div>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  mono = false,
+}: Readonly<{
+  label: string;
+  value: string;
+  mono?: boolean;
+}>) {
+  return (
+    <div className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-2">
+      <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-[hsl(var(--theme-muted))]">{label}</span>
+      <span className={["truncate text-right text-[10px]", mono ? "font-mono" : ""].join(" ")} title={value}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function IconActionButton({
+  title,
+  onClick,
+  disabled,
+  icon,
+  fullWidth = false,
+}: Readonly<{
+  title: string;
+  onClick: () => void;
+  disabled: boolean;
+  icon: ReactNode;
+  fullWidth?: boolean;
+}>) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      disabled={disabled}
+      className={[
+        "grid h-7 place-items-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] disabled:opacity-60",
+        fullWidth ? "w-full" : "",
+      ].join(" ")}
+    >
+      {icon}
+    </button>
   );
 }
