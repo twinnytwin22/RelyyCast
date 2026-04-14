@@ -14,7 +14,6 @@ import {
   type RuntimeProcessState,
   type RuntimeState,
 } from "@/src/runtime/neutralino-runtime-orchestrator";
-
 type TabId = "control" | "settings";
 
 type ServerConfig = {
@@ -77,7 +76,7 @@ const DEFAULT_SERVER_CONFIG: ServerConfig = {
   relayPath: "live",
   mediamtxPath: "",
   mediamtxConfigPath: "",
-  cloudflareMode: "temporary",
+  cloudflareMode: "named",
   cloudflareHostname: "",
   cloudflareTunnelName: "relyycast-local",
 };
@@ -92,11 +91,11 @@ const tabs: Array<{ id: TabId; label: string; tip: string }> = [
   { id: "settings", label: "Settings", tip: "Runtime configuration" },
 ];
 
-function normalizeCloudflareMode(value: unknown, hostname: string): CloudflareMode {
+function normalizeCloudflareMode(value: unknown): CloudflareMode {
   if (value === "temporary" || value === "named") {
     return value;
   }
-  return hostname.trim() ? "named" : "temporary";
+  return "named";
 }
 
 function normalizeServerConfig(input: unknown): ServerConfig {
@@ -118,7 +117,7 @@ function normalizeServerConfig(input: unknown): ServerConfig {
       typeof source.mediamtxConfigPath === "string"
         ? source.mediamtxConfigPath
         : DEFAULT_SERVER_CONFIG.mediamtxConfigPath,
-    cloudflareMode: normalizeCloudflareMode(source.cloudflareMode, cloudflareHostname),
+    cloudflareMode: normalizeCloudflareMode(source.cloudflareMode),
     cloudflareHostname,
     cloudflareTunnelName:
       typeof source.cloudflareTunnelName === "string"
@@ -288,7 +287,6 @@ export function StationConsole() {
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [cloudflareActionPending, setCloudflareActionPending] = useState<"connect" | "retry" | "skip" | null>(null);
   const [cloudflareActionError, setCloudflareActionError] = useState<string | null>(null);
-  const [showSetupWizard, setShowSetupWizard] = useState(false);
   const runtimeConfigSignature = useRef<string | null>(null);
 
   const relayPath = runtimeState?.config.relayPath || serverConfig.relayPath || "live";
@@ -475,6 +473,11 @@ export function StationConsole() {
     }
   }
 
+  async function saveAndConnect() {
+    await saveServerConfig();
+    runCloudflareAction("connect");
+  }
+
   function runCloudflareAction(action: "connect" | "retry" | "skip") {
     setCloudflareActionPending(action);
     setCloudflareActionError(null);
@@ -594,19 +597,15 @@ export function StationConsole() {
             onSkipCloudflareForNow: () => {
               void runCloudflareAction("skip");
             },
+            onSaveAndConnect: () => {
+              void saveAndConnect();
+            },
             onSettingsFieldChange: updateServerConfig,
             onSaveSettings: () => {
               void saveServerConfig();
             },
-            onOpenSetupWizard: () => {
-              setShowSetupWizard(true);
-            },
           })}
         </div>
-
-        {showSetupWizard ? (
-          <CloudflareSetupWizard onClose={() => { setShowSetupWizard(false); }} />
-        ) : null}
 
         <AppStatusFooter
           leftStatusLabel="Runtime"
@@ -638,9 +637,9 @@ function renderTab(
     onRequestCloudflareLogin: () => void;
     onRetryCloudflareSetup: () => void;
     onSkipCloudflareForNow: () => void;
+    onSaveAndConnect: () => void;
     onSettingsFieldChange: (field: keyof ServerConfig, value: string) => void;
     onSaveSettings: () => void;
-    onOpenSetupWizard: () => void;
   },
 ) {
   switch (tab) {
@@ -648,6 +647,12 @@ function renderTab(
       const cloudflare = context.runtimeState?.cloudflare ?? null;
       const runtimePhase = context.runtimeState?.phase?.toUpperCase() ?? "STARTING";
       const cloudflareStatus = cloudflare?.status ?? "pending-consent";
+      const cfStage = cloudflare?.setupStage ?? "idle";
+      const stageLabel =
+        cfStage === "creating-tunnel" ? "CREATING TUNNEL"
+        : cfStage === "routing-dns" ? "ROUTING DNS"
+        : cfStage === "launching" ? "LAUNCHING"
+        : cloudflareStatus.toUpperCase();
       const cloudflareMessage = cloudflare?.message ?? null;
       const showRetry = cloudflare?.canRetry === true || cloudflare?.nextAction === "retry-cloudflare";
       const isNamed = context.serverConfig.cloudflareMode === "named";
@@ -660,34 +665,25 @@ function renderTab(
       const listeners = String(context.streamHealth?.listenerCount ?? 0);
       const errorMessage = context.cloudflareActionError ?? context.settingsError;
       const statusMessage = cloudflareMessage ?? (context.settingsStatus !== "Waiting for runtime state." ? context.settingsStatus : null);
+      const hasHostname = context.serverConfig.cloudflareHostname.trim().length > 0;
+      const canConnect = isNamed ? hasHostname : true;
+      const dnsJustProvisioned = cloudflare?.dnsJustProvisioned === true && cloudflareStatus === "ready";
 
       return (
         <div className="grid h-full grid-cols-2 gap-2">
           {/* Left: Cloudflare Controls */}
-          <div className="flex flex-col gap-1.5 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-2">
-            <div className="flex items-center justify-between">
-              <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Cloudflare</p>
-              {isNamed ? (
-                <button
-                  type="button"
-                  data-no-drag="true"
-                  onClick={context.onOpenSetupWizard}
-                  className="h-5 rounded-sm border border-[hsl(var(--theme-primary))] px-1.5 text-[8px] font-semibold text-[hsl(var(--theme-primary))] transition-colors hover:bg-[hsl(var(--theme-primary))] hover:text-white"
-                >
-                  Setup Guide
-                </button>
-              ) : null}
-            </div>
+          <div className="flex flex-col gap-1 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-2">
+            <p className="shrink-0 text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Cloudflare</p>
 
             {/* Mode toggle */}
-            <div className="flex overflow-hidden rounded-sm border border-[hsl(var(--theme-border))]">
+            <div className="flex shrink-0 overflow-hidden rounded-sm border border-[hsl(var(--theme-border))]">
               {(["temporary", "named"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => { context.onSettingsFieldChange("cloudflareMode", mode); }}
                   className={[
-                    "flex-1 h-7 text-[9px] font-semibold transition-colors",
+                    "flex-1 h-6 text-[9px] font-semibold transition-colors",
                     context.serverConfig.cloudflareMode === mode
                       ? "bg-[hsl(var(--theme-primary))] text-white"
                       : "bg-[hsl(var(--theme-surface-alt))]",
@@ -698,95 +694,120 @@ function renderTab(
               ))}
             </div>
 
-            {/* Hostname + Tunnel Name — always visible, disabled in temp mode */}
-            <div className="grid grid-cols-2 gap-1">
-              <ConfigField
-                label="Hostname"
-                value={context.serverConfig.cloudflareHostname}
-                disabled={!isNamed}
-                onChange={(value) => { context.onSettingsFieldChange("cloudflareHostname", value); }}
-              />
-              <ConfigField
-                label="Tunnel Name"
-                value={context.serverConfig.cloudflareTunnelName}
-                disabled={!isNamed}
-                onChange={(value) => { context.onSettingsFieldChange("cloudflareTunnelName", value); }}
-              />
-            </div>
+            {isNamed ? (
+              <>
+                {/* Hostname */}
+                <label className="shrink-0 grid gap-0.5">
+                  <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[hsl(var(--theme-muted))]">Hostname</span>
+                  <input
+                    type="text"
+                    value={context.serverConfig.cloudflareHostname}
+                    placeholder="e.g. stream.yourdomain.com"
+                    onChange={(e) => { context.onSettingsFieldChange("cloudflareHostname", e.target.value); }}
+                    className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-white px-1.5 text-[10px] leading-4 outline-none focus:border-[hsl(var(--theme-primary))] dark:bg-[hsl(var(--theme-surface))]"
+                  />
+                </label>
 
-            {/* Save · Connect · Skip */}
-            <div className="grid grid-cols-3 gap-1">
-              <button
-                type="button"
-                onClick={context.onSaveSettings}
-                disabled={context.isSavingSettings}
-                className="h-7 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-60"
-              >
-                {context.isSavingSettings ? "Saving…" : "Save"}
-              </button>
-              <button
-                type="button"
-                onClick={context.onRequestCloudflareLogin}
-                disabled={hasBusyAction || isProvisioning}
-                className="h-7 rounded-sm border border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-primary))] text-[9px] font-semibold text-white disabled:opacity-60"
-              >
-                {isConnectBusy ? "Connecting…" : "Connect"}
-              </button>
-              <button
-                type="button"
-                onClick={context.onSkipCloudflareForNow}
-                disabled={hasBusyAction || isProvisioning || cloudflareStatus === "ready"}
-                className="h-7 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-60"
-              >
-                {isSkipBusy ? "Skipping…" : "Skip"}
-              </button>
-            </div>
+                {/* Tunnel Name */}
+                <label className="shrink-0 grid gap-0.5">
+                  <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[hsl(var(--theme-muted))]">Tunnel Name</span>
+                  <input
+                    type="text"
+                    value={context.serverConfig.cloudflareTunnelName}
+                    onChange={(e) => { context.onSettingsFieldChange("cloudflareTunnelName", e.target.value); }}
+                    className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-white px-1.5 text-[10px] leading-4 outline-none focus:border-[hsl(var(--theme-primary))] dark:bg-[hsl(var(--theme-surface))]"
+                  />
+                </label>
 
-            {/* Retry — always rendered, disabled when not applicable */}
-            <button
-              type="button"
-              onClick={context.onRetryCloudflareSetup}
-              disabled={hasBusyAction || isProvisioning || !showRetry}
-              className="h-7 w-full rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-40"
-            >
-              {isRetryBusy ? "Retrying…" : "Retry Setup"}
-            </button>
+                <p className="shrink-0 text-[8px] text-[hsl(var(--theme-muted))] leading-4">
+                  Clicking Connect will open Cloudflare authorization in your browser — no API token required.
+                </p>
+
+                {/* CTA */}
+                <div className="shrink-0 grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    onClick={context.onSaveAndConnect}
+                    disabled={hasBusyAction || isProvisioning || !canConnect}
+                    className="col-span-2 h-7 rounded-sm border border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-primary))] text-[9px] font-semibold text-white disabled:opacity-60"
+                  >
+                    {isConnectBusy ? "Connecting…" : "Save & Connect"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={context.onSkipCloudflareForNow}
+                    disabled={hasBusyAction || isProvisioning || cloudflareStatus === "ready"}
+                    className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-60"
+                  >
+                    {isSkipBusy ? "Skipping…" : "Skip"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={context.onRetryCloudflareSetup}
+                    disabled={hasBusyAction || isProvisioning || !showRetry}
+                    className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-40"
+                  >
+                    {isRetryBusy ? "Retrying…" : "Retry"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              /* Temp URL mode */
+              <div className="flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={context.onRequestCloudflareLogin}
+                  disabled={hasBusyAction || isProvisioning}
+                  className="h-7 rounded-sm border border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-primary))] text-[9px] font-semibold text-white disabled:opacity-60"
+                >
+                  {isConnectBusy ? "Connecting…" : "Start Temp URL"}
+                </button>
+                <button
+                  type="button"
+                  onClick={context.onSkipCloudflareForNow}
+                  disabled={hasBusyAction || isProvisioning || cloudflareStatus === "ready"}
+                  className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-60"
+                >
+                  {isSkipBusy ? "Skipping…" : "Skip for Now"}
+                </button>
+                {showRetry ? (
+                  <button
+                    type="button"
+                    onClick={context.onRetryCloudflareSetup}
+                    disabled={hasBusyAction || isProvisioning}
+                    className="h-6 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[9px] font-semibold disabled:opacity-40"
+                  >
+                    {isRetryBusy ? "Retrying…" : "Retry"}
+                  </button>
+                ) : null}
+              </div>
+            )}
 
             {statusMessage ? (
-              <div className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1 text-[9px] text-[hsl(var(--theme-muted))]">
+              <div className="shrink-0 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-1.5 py-1 text-[9px] text-[hsl(var(--theme-muted))] leading-4">
                 {statusMessage}
               </div>
             ) : null}
 
             {errorMessage ? (
-              <div className="rounded-sm border border-red-500/50 bg-red-500/10 px-2 py-1 text-[9px] text-red-600 dark:text-red-300">
-                <span>{errorMessage}</span>
-                {isNamed ? (
-                  <button
-                    type="button"
-                    data-no-drag="true"
-                    onClick={context.onOpenSetupWizard}
-                    className="ml-2 font-semibold underline underline-offset-2 hover:no-underline"
-                  >
-                    View setup guide →
-                  </button>
-                ) : null}
+              <div className="shrink-0 rounded-sm border border-red-500/50 bg-red-500/10 px-1.5 py-1 text-[9px] text-red-600 dark:text-red-300 leading-4">
+                {errorMessage}
               </div>
             ) : null}
           </div>
 
           {/* Right: Status + Stream */}
           <div className="flex flex-col gap-1.5 rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-2">
-            <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Status</p>
+            <p className="shrink-0 text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Status</p>
 
             <div className="grid grid-cols-2 gap-1">
               <StatusTile label="Runtime" value={runtimePhase} />
-              <StatusTile label="Cloudflare" value={cloudflareStatus.toUpperCase()} />
+              <StatusTile label="Cloudflare" value={stageLabel} />
               <StatusTile label="Relay" value={relayReady} />
               <StatusTile label="Listeners" value={listeners} />
             </div>
 
-            <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Stream</p>
+            <p className="shrink-0 text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Stream</p>
 
             <UrlRow
               label="MP3"
@@ -798,6 +819,12 @@ function renderTab(
               value={context.hlsUrl}
               onCopy={() => { void navigator.clipboard.writeText(context.hlsUrl); }}
             />
+
+            {dnsJustProvisioned ? (
+              <div className="shrink-0 rounded-sm border border-amber-500/40 bg-amber-500/10 px-1.5 py-1 text-[9px] text-amber-700 dark:text-amber-300 leading-4">
+                Tunnel ready — DNS may take 1–2 min to propagate globally.
+              </div>
+            ) : null}
 
             <div className="grid grid-cols-2 gap-1">
               <ActionButton onClick={() => { window.open(context.streamUrl, "_blank", "noopener,noreferrer"); }}>
@@ -959,114 +986,4 @@ function ActionButton({
   );
 }
 
-type WizardStep = {
-  number: number;
-  title: string;
-  body: string;
-  linkLabel?: string;
-  linkUrl?: string;
-};
 
-const WIZARD_STEPS: WizardStep[] = [
-  {
-    number: 1,
-    title: "Add domain to Cloudflare",
-    body: "Your domain must be managed by Cloudflare DNS. Log in and add your site if you haven't already.",
-    linkLabel: "Cloudflare Dashboard →",
-    linkUrl: "https://dash.cloudflare.com",
-  },
-  {
-    number: 2,
-    title: "Create a tunnel in Zero Trust",
-    body: "Go to Networks → Tunnels → Create a tunnel. Choose Cloudflared as the connector type.",
-    linkLabel: "Zero Trust Dashboard →",
-    linkUrl: "https://one.dash.cloudflare.com/",
-  },
-  {
-    number: 3,
-    title: "Name your tunnel",
-    body: "Give the tunnel a name (e.g. relyycast-local). Copy it exactly into the Tunnel Name field in this panel.",
-  },
-  {
-    number: 4,
-    title: "Add a public hostname",
-    body: "In the tunnel wizard, add a public hostname (e.g. radio.yourdomain.com) pointing to HTTP → localhost:8177. That value is your Hostname.",
-  },
-  {
-    number: 5,
-    title: "Enter credentials and connect",
-    body: "Fill in Hostname and Tunnel Name above, click Save, then click Connect. Your browser will open for cloudflared authentication with Cloudflare.",
-  },
-];
-
-function CloudflareSetupWizard({ onClose }: Readonly<{ onClose: () => void }>) {
-  return (
-    <div
-      data-no-drag="true"
-      className="absolute inset-0 z-50 flex items-center justify-center bg-black/60"
-      onClick={onClose}
-    >
-      <div
-        className="w-145 max-h-90 overflow-y-auto rounded border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] p-3 shadow-lg"
-        onClick={(e) => { e.stopPropagation(); }}
-      >
-        <div className="mb-2.5 flex items-center justify-between">
-          <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">
-            Cloudflare Setup Guide
-          </p>
-          <button
-            type="button"
-            data-no-drag="true"
-            onClick={onClose}
-            className="inline-flex h-5 w-5 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[10px] font-bold transition-colors hover:border-[hsl(var(--theme-primary))] hover:bg-[hsl(var(--theme-primary))] hover:text-white"
-          >
-            ×
-          </button>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2">
-          {WIZARD_STEPS.slice(0, 4).map((step) => (
-            <WizardStepCard key={step.number} step={step} />
-          ))}
-          <div className="col-span-2">
-            <WizardStepCard step={WIZARD_STEPS[4]} highlight />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function WizardStepCard({
-  step,
-  highlight = false,
-}: Readonly<{ step: WizardStep; highlight?: boolean }>) {
-  return (
-    <div
-      className={[
-        "flex flex-col gap-1 rounded-sm border p-2",
-        highlight
-          ? "border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-surface-alt))]"
-          : "border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))]",
-      ].join(" ")}
-    >
-      <div className="flex items-center gap-1.5">
-        <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm bg-[hsl(var(--theme-primary))] text-[8px] font-black text-white">
-          {step.number}
-        </span>
-        <p className="text-[9px] font-bold leading-tight">{step.title}</p>
-      </div>
-      <p className="text-[9px] leading-4 text-[hsl(var(--theme-muted))]">{step.body}</p>
-      {step.linkUrl ? (
-        <button
-          type="button"
-          data-no-drag="true"
-          onClick={() => { window.open(step.linkUrl, "_blank", "noopener,noreferrer"); }}
-          className="mt-auto self-start text-[8px] font-semibold text-[hsl(var(--theme-primary))] underline underline-offset-2 hover:no-underline"
-        >
-          {step.linkLabel}
-        </button>
-      ) : null}
-    </div>
-  );
-}

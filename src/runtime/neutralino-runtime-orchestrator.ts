@@ -176,7 +176,7 @@ function createDefaultConfig(): RuntimeConfig {
     sampleRate: "44100",
     channels: "2",
     cloudflaredPath: "",
-    cloudflareMode: "temporary",
+    cloudflareMode: "named",
     cloudflareTunnelName: "relyycast-local",
     cloudflareHostname: "",
     cloudflareConfigPath: "",
@@ -186,6 +186,7 @@ function createDefaultConfig(): RuntimeConfig {
 function createDefaultCloudflareState(): CloudflareOnboardingState {
   return {
     status: "pending-consent",
+    setupStage: "idle",
     message: null,
     binaryPath: null,
     appDirectory: null,
@@ -198,6 +199,7 @@ function createDefaultCloudflareState(): CloudflareOnboardingState {
     configPath: null,
     loginRequired: false,
     dnsRouted: false,
+    dnsJustProvisioned: false,
     requiresUserAction: true,
     nextAction: "connect-cloudflare",
     canRetry: false,
@@ -300,11 +302,11 @@ function normalizePort(value: unknown, fallback: number) {
   return Math.floor(parsed);
 }
 
-function normalizeCloudflareMode(value: unknown, hostname: string): CloudflareMode {
+function normalizeCloudflareMode(value: unknown): CloudflareMode {
   if (value === "temporary" || value === "named") {
     return value;
   }
-  return hostname ? "named" : "temporary";
+  return "named";
 }
 
 function normalizeRuntimeConfig(source: unknown): RuntimeConfig {
@@ -330,7 +332,7 @@ function normalizeRuntimeConfig(source: unknown): RuntimeConfig {
     sampleRate: sanitizeText(input.sampleRate, 12) || base.sampleRate,
     channels: sanitizeText(input.channels, 4) || base.channels,
     cloudflaredPath: normalizeExecutablePath(input.cloudflaredPath),
-    cloudflareMode: normalizeCloudflareMode(input.cloudflareMode, cloudflareHostname),
+    cloudflareMode: normalizeCloudflareMode(input.cloudflareMode),
     cloudflareTunnelName: sanitizeText(input.cloudflareTunnelName, 120) || base.cloudflareTunnelName,
     cloudflareHostname,
     cloudflareConfigPath: normalizeExecutablePath(input.cloudflareConfigPath),
@@ -388,6 +390,16 @@ function mergePersistedCloudflareState(
     configPath: typeof input.configPath === "string" ? input.configPath : base.configPath,
     loginRequired: input.loginRequired === true,
     dnsRouted: input.dnsRouted === true,
+    dnsJustProvisioned: false,
+    setupStage:
+      input.setupStage === "idle"
+      || input.setupStage === "creating-tunnel"
+      || input.setupStage === "routing-dns"
+      || input.setupStage === "launching"
+      || input.setupStage === "ready"
+      || input.setupStage === "failed"
+        ? input.setupStage
+        : base.setupStage,
     requiresUserAction:
       input.requiresUserAction === true
         ? true

@@ -15,6 +15,7 @@ type CloudflareMode = "temporary" | "named";
 
 export type CloudflareOnboardingState = {
   status: "pending-consent" | "login-required" | "provisioning" | "ready" | "error";
+  setupStage: "idle" | "creating-tunnel" | "routing-dns" | "launching" | "ready" | "failed";
   message: string | null;
   binaryPath: string | null;
   appDirectory: string | null;
@@ -27,6 +28,7 @@ export type CloudflareOnboardingState = {
   configPath: string | null;
   loginRequired: boolean;
   dnsRouted: boolean;
+  dnsJustProvisioned: boolean;
   requiresUserAction: boolean;
   nextAction: "connect-cloudflare" | "retry-cloudflare" | "skip-cloudflare" | "none";
   canRetry: boolean;
@@ -120,6 +122,7 @@ function getHostnameFromUrl(value: string | null | undefined) {
 function createDefaultCloudflareState(): CloudflareOnboardingState {
   return {
     status: "pending-consent",
+    setupStage: "idle",
     message: null,
     binaryPath: null,
     appDirectory: null,
@@ -132,6 +135,7 @@ function createDefaultCloudflareState(): CloudflareOnboardingState {
     configPath: null,
     loginRequired: false,
     dnsRouted: false,
+    dnsJustProvisioned: false,
     requiresUserAction: true,
     nextAction: "connect-cloudflare",
     canRetry: false,
@@ -673,6 +677,7 @@ export async function ensureCloudflareOnboarding(
   const binaryExists = await isCloudflaredExecutableAvailable(cloudflaredPath, appDirectory);
   if (!binaryExists) {
     state.status = "error";
+    state.setupStage = "failed";
     state.message = `cloudflared binary not found or not executable (${cloudflaredPath}). Set cloudflaredPath or place binary in runtime/cloudflared or build/bin.`;
     state.canRetry = true;
     state.nextAction = "retry-cloudflare";
@@ -688,6 +693,7 @@ export async function ensureCloudflareOnboarding(
 
     if (!shouldResumeQuickTunnel) {
       state.status = "pending-consent";
+      state.setupStage = "idle";
       state.message = "No Cloudflare hostname is configured yet. Connect Cloudflare to start a temporary public URL, or add a hostname later for a named tunnel.";
       state.requiresUserAction = true;
       state.nextAction = "connect-cloudflare";
@@ -696,6 +702,7 @@ export async function ensureCloudflareOnboarding(
     }
 
     state.status = "ready";
+    state.setupStage = "ready";
     state.loginRequired = false;
     state.requiresUserAction = false;
     state.nextAction = "none";
@@ -715,6 +722,7 @@ export async function ensureCloudflareOnboarding(
 
   if (!hostname) {
     state.status = input.trigger === "auto" ? "pending-consent" : "error";
+    state.setupStage = "idle";
     state.message = "Custom Domain mode requires a Cloudflare-managed hostname. Add one in Settings or switch to Temporary URL.";
     state.requiresUserAction = true;
     state.loginRequired = false;
@@ -807,6 +815,7 @@ export async function ensureCloudflareOnboarding(
   state.configPath = tunnelConfigPath;
 
   state.status = "ready";
+  state.setupStage = "ready";
   state.loginRequired = false;
   state.requiresUserAction = false;
   state.nextAction = "none";
