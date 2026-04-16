@@ -26,6 +26,13 @@
 /build
 /runtime/bun-mp3-helper/dist/
 
+# canonical runtime dependency inventory (track structure + metadata only)
+/binaries/**
+!/binaries/
+!/binaries/README.md
+!/binaries/manifest.json
+!/binaries/**/.gitkeep
+
 # misc
 .DS_Store
 *.pem

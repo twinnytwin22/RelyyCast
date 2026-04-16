@@ -197,6 +197,10 @@ function shellQuote(value: string) {
   return `"${value.replace(/"/g, "\\\"")}"`;
 }
 
+function yamlSingleQuote(value: string) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 function buildCommand(executable: string, args: string[]) {
   return [shellQuote(executable), ...args.map((arg) => shellQuote(arg))].join(" ");
 }
@@ -325,6 +329,7 @@ async function resolveCloudflaredBinary(runtimeRoots: string[], explicitPath: st
 
   const candidateDirectories = runtimeRoots.flatMap((root) => [
     joinPath(root, "build", "bin"),
+    joinPath(root, "binaries", "cloudflared", CLOUDFLARED_PLATFORM === "darwin" ? "mac" : CLOUDFLARED_PLATFORM),
     joinPath(root, "runtime", "cloudflared"),
     joinPath(root, "runtime", "cloudflared", CLOUDFLARED_PLATFORM),
     joinPath(root, "cloudflared"),
@@ -541,8 +546,8 @@ function buildConfigYaml(
 ) {
   const lines: string[] = [
     `tunnel: ${tunnelId}`,
-    `credentials-file: ${credentialsPath}`,
-    `origincert: ${certPath}`,
+    `credentials-file: ${yamlSingleQuote(credentialsPath)}`,
+    `origincert: ${yamlSingleQuote(certPath)}`,
     "ingress:",
   ];
 
@@ -550,14 +555,14 @@ function buildConfigYaml(
     // HLS path rule must come before the catch-all MP3 rule
     if (hlsOriginUrl && hlsRelayPath) {
       const escapedPath = hlsRelayPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      lines.push(`  - hostname: ${hostname}`);
+      lines.push(`  - hostname: ${yamlSingleQuote(hostname)}`);
       lines.push(`    path: /${escapedPath}/.*`);
-      lines.push(`    service: ${hlsOriginUrl}`);
+      lines.push(`    service: ${yamlSingleQuote(hlsOriginUrl)}`);
     }
-    lines.push(`  - hostname: ${hostname}`);
-    lines.push(`    service: ${originUrl}`);
+    lines.push(`  - hostname: ${yamlSingleQuote(hostname)}`);
+    lines.push(`    service: ${yamlSingleQuote(originUrl)}`);
   } else {
-    lines.push(`  - service: ${originUrl}`);
+    lines.push(`  - service: ${yamlSingleQuote(originUrl)}`);
   }
 
   lines.push("  - service: http_status:404");
@@ -689,7 +694,7 @@ export async function ensureCloudflareOnboarding(
   if (!binaryExists) {
     state.status = "error";
     state.setupStage = "failed";
-    state.message = `cloudflared binary not found or not executable (${cloudflaredPath}). Set cloudflaredPath or place binary in runtime/cloudflared or build/bin.`;
+    state.message = `cloudflared binary not found or not executable (${cloudflaredPath}). Add it to binaries/cloudflared/<platform>/ and run deps preflight/stage, or set cloudflaredPath.`;
     state.canRetry = true;
     state.nextAction = "retry-cloudflare";
     return { state, launch: null };

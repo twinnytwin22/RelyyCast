@@ -18,6 +18,7 @@ import {
 type TabId = "control" | "settings";
 
 type ServerConfig = {
+  mp3Enabled: boolean;
   inputUrl: string;
   stationName: string;
   genre: string;
@@ -68,6 +69,7 @@ const CLOUDFLARE_ACTION_PENDING_TIMEOUT_MS = 1500;
 const RUNTIME_STATE_POLL_MS = 2000;
 
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
+  mp3Enabled: false,
   inputUrl: "http://127.0.0.1:4850/live.mp3",
   stationName: "RelyyCast Dev Stream",
   genre: "Various",
@@ -106,6 +108,7 @@ function normalizeServerConfig(input: unknown): ServerConfig {
       ? source.cloudflareHostname
       : DEFAULT_SERVER_CONFIG.cloudflareHostname;
   return {
+    mp3Enabled: source.mp3Enabled === true,
     inputUrl: typeof source.inputUrl === "string" ? source.inputUrl : DEFAULT_SERVER_CONFIG.inputUrl,
     stationName: typeof source.stationName === "string" ? source.stationName : DEFAULT_SERVER_CONFIG.stationName,
     genre: typeof source.genre === "string" ? source.genre : DEFAULT_SERVER_CONFIG.genre,
@@ -129,6 +132,7 @@ function normalizeServerConfig(input: unknown): ServerConfig {
 
 function mapRuntimeConfigToServerConfig(config: RuntimeConfig): ServerConfig {
   return normalizeServerConfig({
+    mp3Enabled: config.mp3Enabled,
     inputUrl: config.inputUrl,
     stationName: config.stationName,
     genre: config.genre,
@@ -147,6 +151,7 @@ function mapRuntimeConfigToServerConfig(config: RuntimeConfig): ServerConfig {
 function mapServerConfigToRuntimeConfig(config: ServerConfig): Partial<RuntimeConfig> {
   const normalized = normalizeServerConfig(config);
   return {
+    mp3Enabled: normalized.mp3Enabled,
     inputUrl: normalized.inputUrl,
     stationName: normalized.stationName,
     genre: normalized.genre,
@@ -295,7 +300,8 @@ export function StationConsole() {
   const localOrigin = `http://${runtimeState?.config.mp3HelperHost || "127.0.0.1"}:${runtimeState?.config.mp3HelperPort ?? 8177}`;
   const localStreamUrl = `${localOrigin}${mountPath}`;
   const publicOrigin = runtimeState?.cloudflare.publicUrl?.replace(/\/+$/g, "") || "";
-  const streamUrl = publicOrigin ? `${publicOrigin}${mountPath}` : localStreamUrl;
+  const mp3Enabled = runtimeState?.config.mp3Enabled ?? serverConfig.mp3Enabled;
+  const streamUrl = mp3Enabled ? (publicOrigin ? `${publicOrigin}${mountPath}` : localStreamUrl) : "---";
   const helperStatusUrl = `${localOrigin}/_status`;
   const fallbackHlsUrl = buildHlsUrl(relayPath);
   const publicHlsUrl = publicOrigin ? `${publicOrigin}/${relayPath}/index.m3u8` : fallbackHlsUrl;
@@ -440,7 +446,7 @@ export function StationConsole() {
     };
   }, [helperRunning, helperStatusUrl, relayPath, relayRunning]);
 
-  function updateServerConfig(field: keyof ServerConfig, value: string) {
+  function updateServerConfig(field: keyof ServerConfig, value: string | boolean) {
     setServerConfig((previous) => ({
       ...previous,
       [field]: value,
@@ -584,6 +590,7 @@ export function StationConsole() {
             streamUrl,
             hlsUrl,
             streamHealth,
+            mp3Enabled,
             serverConfig,
             settingsStatus,
             settingsError,
@@ -630,6 +637,7 @@ function renderTab(
     streamUrl: string;
     hlsUrl: string;
     streamHealth: StreamHealth | null;
+    mp3Enabled: boolean;
     serverConfig: ServerConfig;
     settingsStatus: string;
     settingsError: string | null;
@@ -640,7 +648,7 @@ function renderTab(
     onRetryCloudflareSetup: () => void;
     onSkipCloudflareForNow: () => void;
     onSaveAndConnect: () => void;
-    onSettingsFieldChange: (field: keyof ServerConfig, value: string) => void;
+    onSettingsFieldChange: (field: keyof ServerConfig, value: string | boolean) => void;
     onSaveSettings: () => void;
   },
 ) {
@@ -814,7 +822,13 @@ function renderTab(
             <UrlRow
               label="MP3"
               value={context.streamUrl}
-              onCopy={() => { void navigator.clipboard.writeText(context.streamUrl); }}
+              canCopy={context.mp3Enabled}
+              onCopy={() => {
+                if (!context.mp3Enabled) {
+                  return;
+                }
+                void navigator.clipboard.writeText(context.streamUrl);
+              }}
             />
             <UrlRow
               label="HLS"
@@ -829,7 +843,15 @@ function renderTab(
             ) : null}
 
             <div className="grid grid-cols-2 gap-1">
-              <ActionButton onClick={() => { void nlOs.open(context.streamUrl); }}>
+              <ActionButton
+                disabled={!context.mp3Enabled}
+                onClick={() => {
+                  if (!context.mp3Enabled) {
+                    return;
+                  }
+                  void nlOs.open(context.streamUrl);
+                }}
+              >
                 Open MP3
               </ActionButton>
               <ActionButton onClick={() => { void nlOs.open(context.hlsUrl); }}>
@@ -846,6 +868,26 @@ function renderTab(
           <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">Configuration</p>
 
           <div className="grid grid-cols-3 gap-1.5">
+            <div className="col-span-3 flex items-center justify-between rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1.5">
+              <div>
+                <p className="text-[8px] font-bold uppercase tracking-[0.12em] text-[hsl(var(--theme-muted))]">MP3 Output</p>
+                <p className="text-[9px] text-[hsl(var(--theme-muted))]">Optional Bun helper output. Enable after install, save settings, then restart the app.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  context.onSettingsFieldChange("mp3Enabled", !context.serverConfig.mp3Enabled);
+                }}
+                className={[
+                  "h-7 rounded-sm border px-2 text-[9px] font-semibold",
+                  context.serverConfig.mp3Enabled
+                    ? "border-[hsl(var(--theme-primary))] bg-[hsl(var(--theme-primary))] text-white"
+                    : "border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))]",
+                ].join(" ")}
+              >
+                {context.serverConfig.mp3Enabled ? "Enabled" : "Disabled"}
+              </button>
+            </div>
             <ConfigField
               label="Input URL"
               value={context.serverConfig.inputUrl}
@@ -928,8 +970,9 @@ function StatusTile({
 function UrlRow({
   label,
   value,
+  canCopy = true,
   onCopy,
-}: Readonly<{ label: string; value: string; onCopy: () => void }>) {
+}: Readonly<{ label: string; value: string; canCopy?: boolean; onCopy: () => void }>) {
   return (
     <div className="grid grid-cols-[32px_minmax(0,1fr)_48px] items-center gap-1 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-1.5 py-1">
       <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[hsl(var(--theme-muted))]">{label}</span>
@@ -937,7 +980,8 @@ function UrlRow({
       <button
         type="button"
         onClick={onCopy}
-        className="h-5 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] text-[8px] font-semibold"
+        disabled={!canCopy}
+        className="h-5 rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))] text-[8px] font-semibold disabled:cursor-not-allowed disabled:opacity-50"
       >
         Copy
       </button>
@@ -972,16 +1016,19 @@ function ConfigField({
 
 function ActionButton({
   children,
+  disabled = false,
   onClick,
 }: Readonly<{
   children: React.ReactNode;
+  disabled?: boolean;
   onClick?: () => void;
 }>) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex h-7 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-1.5 text-[9px] font-semibold"
+      disabled={disabled}
+      className="inline-flex h-7 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-1.5 text-[9px] font-semibold disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>

@@ -1,6 +1,6 @@
 import path from "node:path";
-import { existsSync, readdirSync } from "node:fs";
-import { chmod, cp, mkdir, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, cp, mkdir, readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -8,151 +8,142 @@ const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
 const BUILD_ROOT = path.resolve(REPO_ROOT, "build");
 const BUILD_MEDIAMTX_ROOT = path.resolve(BUILD_ROOT, "mediamtx");
 const BUILD_BIN_ROOT = path.resolve(BUILD_ROOT, "bin");
-const MP3_HELPER_DIST_ROOT = path.resolve(REPO_ROOT, "runtime", "bun-mp3-helper", "dist");
-const MP3_HELPER_BINARY_NAME = process.platform === "win32" ? "relyy-mp3-helper.exe" : "relyy-mp3-helper";
-const CLOUDFLARED_BINARY_NAME = process.platform === "win32" ? "cloudflared.exe" : "cloudflared";
-const CLOUDFLARED_REPO_ROOT = path.resolve(REPO_ROOT, "cloudflared");
+const BINARIES_MANIFEST_PATH = path.resolve(REPO_ROOT, "binaries", "manifest.json");
 
-function getPlatformAssetFolders() {
+function getHostPlatformKey() {
   if (process.platform === "win32") {
-    return ["win"];
+    return "win";
   }
-
   if (process.platform === "darwin") {
-    return ["mac"];
+    return "darwin";
   }
-
-  return [];
+  return "linux";
 }
 
-async function copyIfPresent(sourcePath, destinationPath) {
-  if (!existsSync(sourcePath)) {
-    return false;
+function resolveManifestPathValue(asset, key, platform) {
+  if (typeof asset[key] === "string") {
+    return asset[key];
   }
 
+  const byPlatformKey = `${key}ByPlatform`;
+  const byPlatform = asset[byPlatformKey];
+  if (!byPlatform || typeof byPlatform !== "object") {
+    return "";
+  }
+
+  const value = byPlatform[platform];
+  return typeof value === "string" ? value : "";
+}
+
+function shouldApplyAssetToPlatform(asset, platform) {
+  const value = typeof asset.platform === "string" ? asset.platform : "host";
+  if (value === "any" || value === "host") {
+    return true;
+  }
+  return value === platform;
+}
+
+async function copyAsset(sourcePath, destinationPath) {
+  await mkdir(path.dirname(destinationPath), { recursive: true });
+  await cp(sourcePath, destinationPath, { recursive: true, force: true });
+}
+
+async function readManifest() {
+  if (!existsSync(BINARIES_MANIFEST_PATH)) {
+    throw new Error(`missing binaries manifest: ${path.relative(REPO_ROOT, BINARIES_MANIFEST_PATH)}`);
+  }
+
+  const raw = await readFile(BINARIES_MANIFEST_PATH, "utf8");
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.assets)) {
+    throw new Error("invalid binaries manifest: expected { assets: [] }");
+  }
+
+  return parsed.assets;
+}
+
+function isExecutableAsset(asset) {
+  return asset.executable === true && process.platform !== "win32";
+}
+
+async function applyUnixExecutableBitIfNeeded(destinationPath, asset) {
+  if (!isExecutableAsset(asset)) {
+    return;
+  }
   try {
-    await cp(sourcePath, destinationPath, { recursive: true });
+    await chmod(destinationPath, 0o755);
   } catch (err) {
-    if (err.code === "EPERM") {
-      console.warn(`[build] could not copy ${path.basename(sourcePath)} (file may be locked/in-use), skipping`);
-      return existsSync(destinationPath); // treat as success if dest already exists
-    }
-    throw err;
+    throw new Error(`failed to chmod executable ${path.relative(REPO_ROOT, destinationPath)}: ${err.message}`);
   }
-  return true;
-}
-
-function getMp3HelperBinaryCandidates() {
-  const explicitBinary = process.env.RELYY_MP3_HELPER_BINARY?.trim();
-  if (explicitBinary) {
-    return [path.resolve(REPO_ROOT, explicitBinary)];
-  }
-
-  return [
-    path.resolve(MP3_HELPER_DIST_ROOT, "host", MP3_HELPER_BINARY_NAME),
-    path.resolve(MP3_HELPER_DIST_ROOT, `${process.platform}-${process.arch}`, MP3_HELPER_BINARY_NAME),
-    path.resolve(MP3_HELPER_DIST_ROOT, process.platform === "win32" ? "bun-windows-x64-modern" : "bun-linux-x64-modern", MP3_HELPER_BINARY_NAME),
-    path.resolve(MP3_HELPER_DIST_ROOT, process.platform === "win32" ? "bun-windows-arm64-modern" : "bun-linux-arm64-modern", MP3_HELPER_BINARY_NAME),
-    path.resolve(MP3_HELPER_DIST_ROOT, "bun-darwin-x64", MP3_HELPER_BINARY_NAME),
-    path.resolve(MP3_HELPER_DIST_ROOT, "bun-darwin-arm64", MP3_HELPER_BINARY_NAME),
-  ];
-}
-
-function resolveMp3HelperBinary() {
-  for (const candidate of getMp3HelperBinaryCandidates()) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function resolveCloudflaredBinary() {
-  const explicitBinary = process.env.RELYY_CLOUDFLARED_BINARY?.trim();
-  if (explicitBinary) {
-    const p = path.resolve(REPO_ROOT, explicitBinary);
-    return existsSync(p) ? p : null;
-  }
-
-  const platformFolder = process.platform === "win32" ? "win" : process.platform === "darwin" ? "mac" : "linux";
-  const dir = path.resolve(CLOUDFLARED_REPO_ROOT, platformFolder);
-
-  if (!existsSync(dir)) return null;
-
-  const files = readdirSync(dir).filter((f) => !f.startsWith("."));
-  if (!files.length) return null;
-
-  return path.resolve(dir, files[0]);
 }
 
 async function main() {
+  const hostPlatform = getHostPlatformKey();
+  const assets = await readManifest();
+
   await mkdir(BUILD_ROOT, { recursive: true });
   try {
     await rm(BUILD_MEDIAMTX_ROOT, { recursive: true, force: true });
-  } catch (err) {
-    if (err.code !== "EPERM") throw err;
-    console.warn("[build] could not remove mediamtx build dir (files may be locked), will overwrite in place");
+    await rm(BUILD_BIN_ROOT, { recursive: true, force: true });
+  } catch {
+    // Continue and overwrite in place if needed.
   }
   await mkdir(BUILD_MEDIAMTX_ROOT, { recursive: true });
   await mkdir(BUILD_BIN_ROOT, { recursive: true });
 
+  const requiredMissing = [];
+  const optionalMissing = [];
   const copiedTargets = [];
-  const configSourcePath = path.resolve(REPO_ROOT, "mediamtx", "mediamtx.yml");
-  const configDestinationPath = path.resolve(BUILD_MEDIAMTX_ROOT, "mediamtx.yml");
 
-  if (await copyIfPresent(configSourcePath, configDestinationPath)) {
-    copiedTargets.push(path.relative(REPO_ROOT, configDestinationPath));
+  for (const asset of assets) {
+    if (!shouldApplyAssetToPlatform(asset, hostPlatform)) {
+      continue;
+    }
+
+    const sourceValue = resolveManifestPathValue(asset, "source", hostPlatform);
+    const destinationValue = resolveManifestPathValue(asset, "destination", hostPlatform);
+    if (!sourceValue || !destinationValue) {
+      const descriptor = `${asset.id || "unknown"} (platform=${hostPlatform})`;
+      if (asset.required === true) {
+        requiredMissing.push(`${descriptor}: missing source/destination mapping in binaries/manifest.json`);
+      } else {
+        optionalMissing.push(`${descriptor}: missing source/destination mapping in binaries/manifest.json`);
+      }
+      continue;
+    }
+
+    const sourcePath = path.resolve(REPO_ROOT, sourceValue);
+    const destinationPath = path.resolve(REPO_ROOT, destinationValue);
+
+    if (!existsSync(sourcePath)) {
+      const descriptor = `${asset.id || "unknown"} -> ${sourceValue}`;
+      if (asset.required === true) {
+        requiredMissing.push(descriptor);
+      } else {
+        optionalMissing.push(descriptor);
+      }
+      continue;
+    }
+
+    await copyAsset(sourcePath, destinationPath);
+    await applyUnixExecutableBitIfNeeded(destinationPath, asset);
+    copiedTargets.push(path.relative(REPO_ROOT, destinationPath));
   }
 
-  for (const folderName of getPlatformAssetFolders()) {
-    const sourcePath = path.resolve(REPO_ROOT, "mediamtx", folderName);
-    const destinationPath = path.resolve(BUILD_MEDIAMTX_ROOT, folderName);
-
-    if (await copyIfPresent(sourcePath, destinationPath)) {
-      copiedTargets.push(path.relative(REPO_ROOT, destinationPath));
+  if (optionalMissing.length) {
+    console.warn("[build] optional runtime assets missing:");
+    for (const missing of optionalMissing) {
+      console.warn(`  - ${missing}`);
     }
   }
 
-  const macBinaryPath = path.resolve(BUILD_MEDIAMTX_ROOT, "mac", "mediamtx");
-  if (process.platform !== "win32" && existsSync(macBinaryPath)) {
-    await chmod(macBinaryPath, 0o755);
-  }
-
-  const helperSourcePath = resolveMp3HelperBinary();
-  if (helperSourcePath) {
-    const helperDestinationPath = path.resolve(BUILD_BIN_ROOT, MP3_HELPER_BINARY_NAME);
-    await cp(helperSourcePath, helperDestinationPath);
-
-    if (process.platform !== "win32") {
-      await chmod(helperDestinationPath, 0o755);
+  if (requiredMissing.length) {
+    console.error("[build] required runtime assets missing from canonical binaries inventory:");
+    for (const missing of requiredMissing) {
+      console.error(`  - ${missing}`);
     }
-
-    copiedTargets.push(path.relative(REPO_ROOT, helperDestinationPath));
-  } else {
-    console.log(
-      "[build] no Bun MP3 helper binary found to stage. Run `npm run mp3-helper:build` first.",
-    );
-  }
-
-  const cloudflaredSourcePath = resolveCloudflaredBinary();
-  if (cloudflaredSourcePath) {
-    const cloudflaredDestinationPath = path.resolve(BUILD_BIN_ROOT, CLOUDFLARED_BINARY_NAME);
-    await cp(cloudflaredSourcePath, cloudflaredDestinationPath);
-
-    if (process.platform !== "win32") {
-      await chmod(cloudflaredDestinationPath, 0o755);
-    }
-
-    copiedTargets.push(path.relative(REPO_ROOT, cloudflaredDestinationPath));
-  } else {
-    console.log(
-      "[build] no cloudflared binary found to stage. Add it under runtime/cloudflared or set RELYY_CLOUDFLARED_BINARY.",
-    );
-  }
-
-  if (!copiedTargets.length) {
-    console.log("[build] no runtime assets were staged.");
-    return;
+    console.error("[build] add required files under binaries/ and re-run `npm run deps:stage`.");
+    process.exit(1);
   }
 
   console.log(`[build] staged runtime assets: ${copiedTargets.join(", ")}`);

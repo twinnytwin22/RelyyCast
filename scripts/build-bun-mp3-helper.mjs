@@ -16,8 +16,6 @@ function getBunExecutableCandidates() {
     candidates.push(process.env.BUN_BIN.trim());
   }
 
-  candidates.push("bun");
-
   if (process.platform === "win32") {
     const userProfile = process.env.USERPROFILE ?? "";
     if (userProfile) {
@@ -36,7 +34,17 @@ function getBunExecutableCandidates() {
         ),
       );
     }
+
+    return candidates;
   }
+
+  const home = process.env.HOME ?? "";
+  if (home) {
+    candidates.push(path.resolve(home, ".bun", "bin", "bun"));
+  }
+
+  candidates.push("/opt/homebrew/bin/bun");
+  candidates.push("/usr/local/bin/bun");
 
   return candidates;
 }
@@ -67,24 +75,29 @@ function isWindowsTarget(target) {
 
 function resolveBunExecutable() {
   const candidates = getBunExecutableCandidates();
-  let pathFallback = "bun";
-
   for (const candidate of candidates) {
-    if (candidate === "bun") {
-      pathFallback = candidate;
-      continue;
-    }
-
     if (existsSync(candidate)) {
       return candidate;
     }
   }
 
-  return pathFallback;
+  if (process.platform === "win32") {
+    // On Windows, Bun is frequently installed via WinGet and available on PATH.
+    return "bun";
+  }
+
+  return null;
 }
 
 function runBunCompile(outfile, target = null) {
   const bunExecutable = resolveBunExecutable();
+  if (!bunExecutable) {
+    const platform = `${process.platform}/${process.arch}`;
+    throw new Error(
+      `Bun executable not found for ${platform}. Install Bun or set BUN_BIN to the Bun binary path, then re-run \`npm run mp3-helper:build\`.`,
+    );
+  }
+
   const args = ["build", ENTRY_FILE, "--compile", "--outfile", outfile];
   if (target) {
     args.push("--target", target);
@@ -97,8 +110,9 @@ function runBunCompile(outfile, target = null) {
   });
 
   if (result.error && result.error.code === "ENOENT") {
+    const platform = `${process.platform}/${process.arch}`;
     throw new Error(
-      "Bun executable not found. Install Bun and re-run `npm run mp3-helper:build`.",
+      `Bun executable not found for ${platform}. Install Bun or set BUN_BIN to the Bun binary path, then re-run \`npm run mp3-helper:build\`.`,
     );
   }
 

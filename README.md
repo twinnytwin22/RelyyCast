@@ -10,6 +10,82 @@ This repo currently includes:
 - Bun MP3 helper source + build pipeline
 - Cloudflare tunnel onboarding/runtime wiring
 
+Setup guide for new machines:
+
+- `docs/new-machine-setup.md`
+
+Consumer troubleshooting guide (no code access required):
+
+- `docs/consumer-troubleshooting-guide.md`
+
+## Canonical runtime dependencies
+
+Runtime dependency binaries are sourced from a single canonical inventory folder:
+
+- `binaries/`
+
+This folder structure is committed to git, but binary payloads are not.
+
+For host setup, place binaries in these paths:
+
+- `binaries/mediamtx/mediamtx.yml`
+- macOS:
+	- `binaries/mediamtx/mac/mediamtx`
+	- `binaries/cloudflared/mac/cloudflared`
+	- `binaries/mp3-helper/mac/relyy-mp3-helper` (optional)
+- Windows:
+	- `binaries/mediamtx/win/mediamtx.exe`
+	- `binaries/cloudflared/win/cloudflared.exe`
+	- `binaries/mp3-helper/win/relyy-mp3-helper.exe` (optional)
+
+Before running app/build/packaging commands:
+
+```bash
+npm run deps:seed
+npm run deps:preflight
+npm run deps:stage
+```
+
+`deps:preflight` also checks for global Bun and prints install instructions if missing.
+
+### macOS developer notes
+
+- Recommended bootstrap sequence:
+
+```bash
+npm install
+npm run deps:seed
+npm run deps:preflight
+npm run deps:stage
+npm run neutralino:run
+```
+
+- Quick checks:
+
+```bash
+ls -l binaries/mediamtx/mac/mediamtx binaries/cloudflared/mac/cloudflared
+ls -l build/mediamtx/mac/mediamtx build/bin/cloudflared
+```
+
+### Windows developer notes
+
+- Recommended bootstrap sequence (PowerShell):
+
+```powershell
+npm install
+npm run deps:seed
+npm run deps:preflight
+npm run deps:stage
+npm run neutralino:run
+```
+
+- Quick checks (PowerShell):
+
+```powershell
+Get-Item binaries/mediamtx/win/mediamtx.exe, binaries/cloudflared/win/cloudflared.exe
+Get-Item build/mediamtx/win/mediamtx.exe, build/bin/cloudflared.exe
+```
+
 ## Cloudflare onboarding behavior
 
 Cloudflare setup is consent-first and local-first:
@@ -49,6 +125,24 @@ Run the Neutralino desktop shell:
 
 ```bash
 npm run neutralino:run
+```
+
+Preflight runtime dependencies only:
+
+```bash
+npm run deps:preflight
+```
+
+Seed canonical `binaries/` inventory from legacy locations in this repo:
+
+```bash
+npm run deps:seed
+```
+
+Stage runtime dependencies from canonical inventory to `build/`:
+
+```bash
+npm run deps:stage
 ```
 
 Update Neutralino runtime binary:

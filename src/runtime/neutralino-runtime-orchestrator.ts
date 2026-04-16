@@ -33,6 +33,7 @@ export type RuntimeProcessState = {
 export type CloudflareMode = "temporary" | "named";
 
 export type RuntimeConfig = {
+  mp3Enabled: boolean;
   inputUrl: string;
   stationName: string;
   genre: string;
@@ -159,6 +160,7 @@ function cloneRuntimeState(state: RuntimeState): RuntimeState {
 
 function createDefaultConfig(): RuntimeConfig {
   return {
+    mp3Enabled: false,
     inputUrl: "http://127.0.0.1:4850/live.mp3",
     stationName: "",
     genre: "Various",
@@ -309,12 +311,20 @@ function normalizeCloudflareMode(value: unknown): CloudflareMode {
   return "named";
 }
 
+function normalizeBoolean(value: unknown, fallback: boolean) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return fallback;
+}
+
 function normalizeRuntimeConfig(source: unknown): RuntimeConfig {
   const input = source && typeof source === "object" ? (source as Partial<RuntimeConfig>) : {};
   const base = createDefaultConfig();
   const cloudflareHostname = sanitizeText(input.cloudflareHostname, 220) || base.cloudflareHostname;
 
   return {
+    mp3Enabled: normalizeBoolean(input.mp3Enabled, base.mp3Enabled),
     inputUrl: sanitizeText(input.inputUrl, 500) || base.inputUrl,
     stationName: sanitizeText(input.stationName, 120) || base.stationName,
     genre: sanitizeText(input.genre, 120) || base.genre,
@@ -717,10 +727,20 @@ function shouldRestartManagedProcess(name: ManagedProcessName) {
   if (runtimeStopping || !runtimeState) {
     return false;
   }
+  if (!isManagedProcessEnabled(name, runtimeState.config)) {
+    return false;
+  }
   if (name !== "cloudflared") {
     return true;
   }
   return runtimeState.cloudflare.status === "ready";
+}
+
+function isManagedProcessEnabled(name: ManagedProcessName, config: RuntimeConfig) {
+  if (name === "mp3Helper" || name === "ffmpegMp3Bridge") {
+    return config.mp3Enabled === true;
+  }
+  return true;
 }
 
 function scheduleRestart(name: ManagedProcessName, reason: string) {
@@ -865,6 +885,8 @@ async function resolveMediatxPath(config: RuntimeConfig) {
     : roots.flatMap((root) => [
       joinPath(root, "build", "mediamtx", platform === "darwin" ? "mac" : "linux", "mediamtx"),
       joinPath(root, "mediamtx", platform === "darwin" ? "mac" : "linux", "mediamtx"),
+      joinPath(root, "build", "bin", "mediamtx"),
+      joinPath(root, "bin", "mediamtx"),
     ]);
 
   const detected = await findFirstExisting(candidates);
@@ -999,6 +1021,9 @@ function getRelayEndpoints(config: RuntimeConfig) {
 }
 
 function getCloudflareOriginUrl(config: RuntimeConfig) {
+  if (!config.mp3Enabled) {
+    return "http://127.0.0.1:8888";
+  }
   const host = sanitizeText(config.mp3HelperHost, 120) || "127.0.0.1";
   const port = normalizePort(config.mp3HelperPort, DEFAULT_MP3_HELPER_PORT);
   return `http://${host}:${port}`;
@@ -1160,6 +1185,20 @@ async function startManagedProcess(name: ManagedProcessName, options?: StartMana
     return;
   }
 
+  if (!isManagedProcessEnabled(name, runtimeState.config)) {
+    clearRestartTimer(name);
+    updateRuntimeState((current) => {
+      const target = current.processes[name];
+      target.running = false;
+      target.spawnId = null;
+      target.pid = null;
+      target.command = "";
+      target.args = [];
+      target.lastError = null;
+    });
+    return;
+  }
+
   const state = runtimeState.processes[name];
   if (state.running) {
     return;
@@ -1273,7 +1312,7 @@ async function killOrphanedManagedProcesses() {
   const names = ["mediamtx", "relyy-mp3-helper", "cloudflared"];
   for (const name of names) {
     try {
-      await os.execCommand(`pkill -x "${name}" 2>/dev/null || true`);
+      await os.execCommand(`pkill -f "${name}" 2>/dev/null || true`);
     } catch {
       // Ignore — no matching process is not an error.
     }

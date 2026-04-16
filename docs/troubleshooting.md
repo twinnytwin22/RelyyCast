@@ -91,11 +91,11 @@ This is the initial state. Click **Connect** in the Control tab to begin setup. 
 
 - **cloudflared binary not found.** The app cannot open the browser auth flow without `cloudflared`. Check:
   1. Download cloudflared from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
-  2. Place it in one of the auto-detected locations:
-     - `runtime/cloudflared/win/cloudflared.exe` (Windows)
-     - `runtime/cloudflared/darwin/cloudflared` (macOS)
-     - `runtime/cloudflared/linux/cloudflared` (Linux)
-  3. Or set the explicit path via **Settings → (advanced)** or the `RELYY_CLOUDFLARED_PATH` environment variable.
+  2. Place it in the canonical inventory path:
+    - `binaries/cloudflared/win/cloudflared.exe` (Windows)
+    - `binaries/cloudflared/mac/cloudflared` (macOS)
+  3. Run `npm run deps:preflight` and `npm run deps:stage`.
+  4. Or set the explicit path via **Settings → (advanced)** or the `RELYY_CLOUDFLARED_PATH` environment variable.
 - **Browser blocked by OS.** Some OS security settings prevent apps from opening browser windows. If the browser did not open, run `cloudflared tunnel login` manually in a terminal. Once authentication completes, click **Retry** in the app.
 
 ---
@@ -122,18 +122,12 @@ The app searched these locations and found nothing:
 
 | Location | Platform |
 |---|---|
-| `runtime/cloudflared/win/cloudflared.exe` | Windows |
-| `runtime/cloudflared/win/cloudflared-windows-amd64.exe` | Windows (alt) |
-| `runtime/cloudflared/darwin/cloudflared` | macOS |
-| `runtime/cloudflared/darwin/cloudflared-darwin-amd64` | macOS (Intel) |
-| `runtime/cloudflared/darwin/cloudflared-darwin-arm64` | macOS (Apple Silicon) |
-| `runtime/cloudflared/linux/cloudflared` | Linux |
-| `runtime/cloudflared/linux/cloudflared-linux-amd64` | Linux (x64) |
-| `runtime/cloudflared/linux/cloudflared-linux-arm64` | Linux (ARM) |
+| `binaries/cloudflared/win/cloudflared.exe` | Windows |
+| `binaries/cloudflared/mac/cloudflared` | macOS |
 | `build/bin/cloudflared[.exe]` | Any |
 | System `PATH` | Any |
 
-**Fix:** Download cloudflared and place it in one of the above locations, or set `RELYY_CLOUDFLARED_PATH` in your environment before launching the app. Then click **Retry**.
+**Fix:** Download cloudflared and place it in the canonical `binaries/` path, run `npm run deps:preflight && npm run deps:stage`, or set `RELYY_CLOUDFLARED_PATH` before launching the app. Then click **Retry**.
 
 ---
 
@@ -251,6 +245,37 @@ If you need to report an issue:
 2. Check the **Console** tab for error messages from the runtime orchestrator — look for lines prefixed with `[AppWindowChrome]` or `[RuntimeOrchestrator]`.
 3. The runtime state file at `<app-data>/relyycast/runtime-state.json` contains the last known state of all processes and Cloudflare onboarding. Include this file when reporting issues.
 4. On macOS/Linux, run `cloudflared --version` in a terminal to confirm cloudflared is installed and executable.
+
+---
+
+## Dependency Preflight
+
+Before local runtime, build, or packaging commands on a new device:
+
+1. Place host binaries in the canonical `binaries/` inventory paths.
+2. Optionally migrate from legacy repo locations with `npm run deps:seed`.
+3. Run `npm run deps:preflight`.
+4. Run `npm run deps:stage`.
+
+If Bun is missing, preflight will print a global install command. Bun is required for MP3 helper development workflows.
+
+Platform-specific preflight command examples:
+
+- macOS/Linux:
+
+```bash
+npm run deps:seed
+npm run deps:preflight
+npm run deps:stage
+```
+
+- Windows (PowerShell):
+
+```powershell
+npm run deps:seed
+npm run deps:preflight
+npm run deps:stage
+```
 
 ---
 

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "id": "mediamtx-config",
+      "required": true,
+      "platform": "any",
+      "source": "binaries/mediamtx/mediamtx.yml",
+      "destination": "build/mediamtx/mediamtx.yml",
+      "executable": false
+    },
+    {
+      "id": "mediamtx-host-binary",
+      "required": true,
+      "platform": "host",
+      "sourceByPlatform": {
+        "win": "binaries/mediamtx/win/mediamtx.exe",
+        "darwin": "binaries/mediamtx/mac/mediamtx",
+        "linux": "binaries/mediamtx/linux/mediamtx"
+      },
+      "destinationByPlatform": {
+        "win": "build/mediamtx/win/mediamtx.exe",
+        "darwin": "build/mediamtx/mac/mediamtx",
+        "linux": "build/mediamtx/linux/mediamtx"
+      },
+      "executable": true
+    },
+    {
+      "id": "cloudflared-host-binary",
+      "required": true,
+      "platform": "host",
+      "sourceByPlatform": {
+        "win": "binaries/cloudflared/win/cloudflared.exe",
+        "darwin": "binaries/cloudflared/mac/cloudflared",
+        "linux": "binaries/cloudflared/linux/cloudflared"
+      },
+      "destinationByPlatform": {
+        "win": "build/bin/cloudflared.exe",
+        "darwin": "build/bin/cloudflared",
+        "linux": "build/bin/cloudflared"
+      },
+      "executable": true
+    },
+    {
+      "id": "mp3-helper-host-binary",
+      "required": false,
+      "platform": "host",
+      "sourceByPlatform": {
+        "win": "binaries/mp3-helper/win/relyy-mp3-helper.exe",
+        "darwin": "binaries/mp3-helper/mac/relyy-mp3-helper",
+        "linux": "binaries/mp3-helper/linux/relyy-mp3-helper"
+      },
+      "destinationByPlatform": {
+        "win": "build/bin/relyy-mp3-helper.exe",
+        "darwin": "build/bin/relyy-mp3-helper",
+        "linux": "build/bin/relyy-mp3-helper"
+      },
+      "executable": true,
+      "optionalReason": "MP3 output is optional and can be disabled in settings."
+    }
+  ]
+}

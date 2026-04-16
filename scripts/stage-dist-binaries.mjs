@@ -18,6 +18,42 @@ const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
 const BUILD_ROOT = path.resolve(REPO_ROOT, "build");
 const DIST_APP_ROOT = path.resolve(REPO_ROOT, "dist", "relyycast");
 
+function getPlatformFolder() {
+  if (process.platform === "win32") {
+    return "win";
+  }
+  if (process.platform === "darwin") {
+    return "mac";
+  }
+  return "linux";
+}
+
+function getRequiredBuildInputs() {
+  const platformFolder = getPlatformFolder();
+  const mediamtxBinaryName = process.platform === "win32" ? "mediamtx.exe" : "mediamtx";
+  const cloudflaredBinaryName = process.platform === "win32" ? "cloudflared.exe" : "cloudflared";
+
+  return [
+    path.resolve(BUILD_ROOT, "mediamtx", "mediamtx.yml"),
+    path.resolve(BUILD_ROOT, "mediamtx", platformFolder, mediamtxBinaryName),
+    path.resolve(BUILD_ROOT, "bin", cloudflaredBinaryName),
+  ];
+}
+
+function validateRequiredBuildInputs() {
+  const missing = getRequiredBuildInputs().filter((pathname) => !existsSync(pathname));
+  if (!missing.length) {
+    return;
+  }
+
+  console.error("[stage-dist] required staged binaries are missing from build/:");
+  for (const pathname of missing) {
+    console.error(`  - ${path.relative(REPO_ROOT, pathname)}`);
+  }
+  console.error("[stage-dist] run `npm run deps:preflight` and `npm run deps:stage` before packaging.");
+  process.exit(1);
+}
+
 async function copyIfPresent(src, dest) {
   if (!existsSync(src)) return false;
   await mkdir(path.dirname(dest), { recursive: true });
@@ -31,10 +67,12 @@ async function main() {
     process.exit(1);
   }
 
+  validateRequiredBuildInputs();
+
   const staged = [];
 
   // mediamtx — copy whole platform folder (mediamtx/win or mediamtx/mac)
-  const platformFolder = process.platform === "win32" ? "win" : process.platform === "darwin" ? "mac" : "linux";
+  const platformFolder = getPlatformFolder();
   const mediamtxSrc = path.resolve(BUILD_ROOT, "mediamtx", platformFolder);
   const mediamtxDest = path.resolve(DIST_APP_ROOT, "build", "mediamtx", platformFolder);
   if (await copyIfPresent(mediamtxSrc, mediamtxDest)) {
