@@ -545,7 +545,7 @@ export function StationConsole() {
 
   return (
     <main className="h-screen overflow-hidden text-[hsl(var(--theme-text))]">
-      <section className="relative flex h-full w-full flex-col overflow-hidden border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface))]">
+      <section className="relative flex h-full w-full flex-col overflow-hidden border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-bg))]">
         <AppWindowChrome
           appName="RelyyCast"
           subtitle="Desktop Control"
@@ -1034,5 +1034,4 @@ function ActionButton({
     </button>
   );
 }
-
 

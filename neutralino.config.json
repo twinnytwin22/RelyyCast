@@ -3,7 +3,7 @@
   "applicationId": "com.relyycast.app",
   "version": "0.1.0",
   "defaultMode": "window",
-  "documentRoot": "/build/",
+  "documentRoot": "/app/",
   
   "port": 0,
   "enableServer": true,
@@ -41,7 +41,7 @@
   },
   "cli": {
     "binaryName": "relyycast",
-    "resourcesPath": "/build/",
+    "resourcesPath": "/app/",
     "extensionsPath": "./extensions/",
     "binaryVersion": "6.7.0",
     "frontendLibrary": {

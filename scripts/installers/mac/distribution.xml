@@ -6,7 +6,8 @@
 
     <!-- Allow install to the system volume only -->
     <domains enable_localSystem="true" enable_currentUserHome="false"/>
-    <options customize="allow" require-scripts="false" rootVolumeOnly="true"/>
+    <!-- Always show component customization so users can explicitly choose MP3 helper -->
+    <options customize="always" require-scripts="false" rootVolumeOnly="true"/>
 
     <!-- Wizard pages -->
     <welcome    file="welcome.html"  mime-type="text/html"/>
@@ -32,6 +33,8 @@
     <choice id="com.relyycast.app.mp3helper"
             title="MP3 Helper"
             description="Enables real-time MP3 streaming output. Optional — only install this if you plan to use MP3 audio format."
+            start_enabled="true"
+            start_visible="true"
             start_selected="false">
         <pkg-ref id="com.relyycast.app.mp3helper"/>
     </choice>

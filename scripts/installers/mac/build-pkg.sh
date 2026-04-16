@@ -54,9 +54,25 @@ for arg in "$@"; do
     esac
 done
 
-# Auto-skip signing if no cert available
+# Auto-skip signing if required certs are unavailable.
+HAS_APP_SIGN_CERT=true
+HAS_INSTALLER_SIGN_CERT=true
+
 if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
-    echo "[pkg] WARNING: No 'Developer ID Application' cert found in keychain — skipping signing"
+    HAS_APP_SIGN_CERT=false
+fi
+
+if ! security find-identity -v -p basic 2>/dev/null | grep -q "Developer ID Installer"; then
+    HAS_INSTALLER_SIGN_CERT=false
+fi
+
+if [ "$HAS_APP_SIGN_CERT" = false ] || [ "$HAS_INSTALLER_SIGN_CERT" = false ]; then
+    if [ "$HAS_APP_SIGN_CERT" = false ]; then
+        echo "[pkg] WARNING: No 'Developer ID Application' cert found in keychain — skipping signing"
+    fi
+    if [ "$HAS_INSTALLER_SIGN_CERT" = false ]; then
+        echo "[pkg] WARNING: No 'Developer ID Installer' cert found in keychain — skipping signing"
+    fi
     SKIP_SIGN=true
     SKIP_NOTARIZE=true
 fi
@@ -87,6 +103,13 @@ sign_binary() {
     log "  signed: $(basename "$binary")"
 }
 
+sign_resource() {
+    local resource="$1"
+    if $SKIP_SIGN; then return 0; fi
+    codesign --force --sign "$SIGN_APP" --timestamp "$resource"
+    log "  signed resource: $(basename "$resource")"
+}
+
 # -----------------------------------------------------------------------
 # Preflight checks
 # -----------------------------------------------------------------------
@@ -101,7 +124,19 @@ MP3_HELPER="$DIST_SRC/build/bin/relyy-mp3-helper"
 HAS_MP3_HELPER=false
 if [ -f "$MP3_HELPER" ]; then
     HAS_MP3_HELPER=true
-    log "MP3 helper found — will build optional component package"
+    if ! $SKIP_SIGN; then
+        TMP_MP3_SIGN_CHECK="$(mktemp /tmp/relyycast-mp3-signcheck.XXXXXX)"
+        cp "$MP3_HELPER" "$TMP_MP3_SIGN_CHECK"
+        if ! codesign --force --sign "$SIGN_APP" --timestamp "$TMP_MP3_SIGN_CHECK" >/dev/null 2>&1; then
+            HAS_MP3_HELPER=false
+            log "WARNING: MP3 helper found but cannot be code-signed on this machine — skipping optional component package"
+        else
+            log "MP3 helper found — will build optional component package"
+        fi
+        rm -f "$TMP_MP3_SIGN_CHECK"
+    else
+        log "MP3 helper found — will build optional component package"
+    fi
 else
     log "MP3 helper not found — skipping optional component package"
 fi
@@ -157,6 +192,11 @@ APP_ENTITLEMENTS="$SCRIPT_DIR/entitlements.plist"
 
 sign_binary "$MACOS_DIR/build/mediamtx/mac/mediamtx"  "$CHILD_ENTITLEMENTS"
 sign_binary "$MACOS_DIR/build/bin/cloudflared"          "$CHILD_ENTITLEMENTS"
+# resources.neu lives beside the app executable and is treated as a nested
+# signed component by codesign. Sign it explicitly before signing relyycast.
+sign_resource "$MACOS_DIR/resources.neu"
+# mediamtx.yml is also inside Contents/MacOS and must be signed as a blob.
+sign_resource "$MACOS_DIR/build/mediamtx/mediamtx.yml"
 sign_binary "$MACOS_DIR/relyycast"                      "$APP_ENTITLEMENTS"
 
 if ! $SKIP_SIGN; then
