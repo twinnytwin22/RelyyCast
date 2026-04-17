@@ -12,11 +12,11 @@ This repo currently includes:
 
 Setup guide for new machines:
 
-- `docs/new-machine-setup.md`
+- `docs/public/new-machine-setup.md`
 
 Consumer troubleshooting guide (no code access required):
 
-- `docs/consumer-troubleshooting-guide.md`
+- `docs/public/consumer-troubleshooting-guide.md`
 
 ## Canonical runtime dependencies
 
