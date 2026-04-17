@@ -12,7 +12,7 @@
 /bin/
 # testing
 /coverage
-
+/docs/private/**
 # next.js
 /.next/
 /out/
@@ -20,7 +20,7 @@
 /mediamtx/mac
 /dist/**
 
-
+/docs/
 /cloudflared/win
 /cloudflared/mac
 # production
