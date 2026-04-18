@@ -3,10 +3,22 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import Neutralino from "@relyycast/neutralino";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
 const BINARIES_MANIFEST_PATH = path.resolve(REPO_ROOT, "binaries", "manifest.json");
+
+let tray = {
+  icon: "/resources/icons/trayIcon.png",
+  menuItems: [
+    {id: "open", text: "Open App"},
+    {id: "sep", text: "-"},
+    {id: "quit", text: "Quit"}
+  ]
+};
+
+
 
 function getHostPlatformKey() {
   if (process.platform === "win32") {

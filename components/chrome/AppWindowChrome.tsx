@@ -315,9 +315,8 @@ export default function AppWindowChrome({
       className="flex items-center gap-2 border-b border-[hsl(var(--theme-border))] px-2.5 py-2"
     >
       <div className="flex min-w-0 items-center gap-2.5">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[10px] font-black tracking-[0.2em] text-[hsl(var(--theme-primary))]">
-          RC
-        </div>
+       <img src="/favicon.ico" alt="App icon" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[10px] font-black tracking-[0.2em] text-[hsl(var(--theme-primary))]" />
+      
         <div className="min-w-0">
           <p className="truncate text-[9px] font-bold uppercase tracking-[0.22em] text-[hsl(var(--theme-muted))]">
             {subtitle}
@@ -333,10 +332,6 @@ export default function AppWindowChrome({
 
         <span suppressHydrationWarning className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[hsl(var(--theme-muted))]">
           {currentDateLabel}
-        </span>
-
-        <span className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[hsl(var(--theme-muted))]">
-          {statusLabel}
         </span>
 
         <button

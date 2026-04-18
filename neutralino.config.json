@@ -17,6 +17,23 @@
     "filesystem.*"
   ],
   "modes": {
+    "tray": {
+      "icon": "/favicon.ico",
+      "menu": [
+        {
+          "id": "show",
+          "text": "Show App"
+        },
+        {
+          "id": "hide",
+          "text": "Hide App"
+        },
+        {
+          "id": "exit",
+          "text": "Exit"
+        }
+      ]
+    },
     "window": {
       "title": "RelyyCast",
       "icon": "/favicon.ico",

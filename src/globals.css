@@ -69,8 +69,8 @@
   
   :root {
     --theme-bg: 210 35% 97%;
-    --theme-surface: 0 0% 100%;
-    --theme-surface-alt: 210 34% 96%;
+    --theme-surface-alt: 0 0% 100%;
+    --theme-surface: 210 34% 96%;
     --theme-border: 214 24% 84%;
     --theme-text: 222 47% 11%;
     --theme-muted: 215 16% 47%;
@@ -145,7 +145,7 @@
   html {
     min-height: 100%;
     background-color: hsl(var(--background));
-    font-size: 18px;
+   /* font-size: 18px; */
 
   }
 
@@ -157,11 +157,18 @@
   }
 
 /* .platform-mac body {
-  font-size: 18px !important;
 }
 
 .platform-windows body {
   font-size: 14px;
 } */
+
+.os-mac {
+  font-size: larger;
+}
+
+.os-windows {
+  font-size: medium
+}
 
 }

@@ -914,15 +914,18 @@ function renderTab(
               onChange={(value) => { context.onSettingsFieldChange("genre", value); }}
             />
             <ConfigField
+            
               label="Description"
               value={context.serverConfig.description}
               onChange={(value) => { context.onSettingsFieldChange("description", value); }}
             />
+                   <div className="hidden">
             <ConfigField
               label="FFmpeg Path"
               value={context.serverConfig.ffmpegPath}
               onChange={(value) => { context.onSettingsFieldChange("ffmpegPath", value); }}
             />
+     
             <ConfigField
               label="MediaMTX Path"
               value={context.serverConfig.mediamtxPath}
@@ -933,6 +936,7 @@ function renderTab(
               value={context.serverConfig.mediamtxConfigPath}
               onChange={(value) => { context.onSettingsFieldChange("mediamtxConfigPath", value); }}
             />
+            </div>
           </div>
 
           <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-1">
@@ -960,7 +964,7 @@ function StatusTile({
   value,
 }: Readonly<{ label: string; value: string }>) {
   return (
-    <div className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1">
+    <div className="rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] px-2 py-1 flex items-baseline gap-2">
       <p className="text-[9px] font-bold uppercase tracking-[0.14em] text-[hsl(var(--theme-muted))]">{label}</p>
       <p className="mt-0.5 truncate text-[10px]" title={value}>{value}</p>
     </div>
