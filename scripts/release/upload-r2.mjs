@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
@@ -257,6 +258,66 @@ async function uploadObject(s3, bucket, objectKey, body, contentType) {
   );
 }
 
+function isRetryableUploadError(error) {
+  if (!error) return false;
+
+  if (error.$retryable || error.retryable || error.name === "TimeoutError") {
+    return true;
+  }
+
+  const code = String(error.code || "").toUpperCase();
+  if (["EPIPE", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(code)) {
+    return true;
+  }
+
+  const message = String(error.message || "").toLowerCase();
+  return [
+    "socket hang up",
+    "connection reset",
+    "timed out",
+    "bad record mac",
+    "streaming request",
+    "network error",
+  ].some((pattern) => message.includes(pattern));
+}
+
+function formatUploadError(error) {
+  const code = error?.code ? ` (${error.code})` : "";
+  return `${error?.message || String(error)}${code}`;
+}
+
+async function uploadObjectWithRetries({
+  s3,
+  bucket,
+  objectKey,
+  contentType,
+  makeBody,
+  maxAttempts = 4,
+  initialBackoffMs = 750,
+}) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await uploadObject(s3, bucket, objectKey, makeBody(), contentType);
+      if (attempt > 1) {
+        console.log(`[release:r2] Upload recovered after retry ${attempt}/${maxAttempts}: ${objectKey}`);
+      }
+      return;
+    } catch (error) {
+      const retryable = isRetryableUploadError(error);
+      if (!retryable || attempt === maxAttempts) {
+        throw error;
+      }
+
+      const delayMs = Math.round(initialBackoffMs * 2 ** (attempt - 1));
+      console.warn(
+        `[release:r2] Transient upload error on ${objectKey} (attempt ${attempt}/${maxAttempts}): ${formatUploadError(error)}`,
+      );
+      console.warn(`[release:r2] Retrying in ${delayMs}ms...`);
+      await sleep(delayMs);
+    }
+  }
+}
+
 async function main() {
   loadReleaseEnvFiles();
   const args = parseArgs(process.argv.slice(2));
@@ -316,17 +377,30 @@ async function main() {
     endpoint,
     forcePathStyle: true,
     credentials: { accessKeyId, secretAccessKey },
+    maxAttempts: 1,
   });
 
-  await uploadObject(s3, bucket, objectKey, fs.createReadStream(artifact.filePath), "application/octet-stream");
-  await uploadObject(s3, bucket, `${objectKey}.sha256`, `${checksum}  ${fileName}\n`, "text/plain; charset=utf-8");
-  await uploadObject(
+  await uploadObjectWithRetries({
     s3,
     bucket,
-    joinObjectKey(releaseKeyRoot, "manifest.json"),
-    JSON.stringify(metadata, null, 2),
-    "application/json; charset=utf-8",
-  );
+    objectKey,
+    contentType: "application/octet-stream",
+    makeBody: () => fs.createReadStream(artifact.filePath),
+  });
+  await uploadObjectWithRetries({
+    s3,
+    bucket,
+    objectKey: `${objectKey}.sha256`,
+    contentType: "text/plain; charset=utf-8",
+    makeBody: () => `${checksum}  ${fileName}\n`,
+  });
+  await uploadObjectWithRetries({
+    s3,
+    bucket,
+    objectKey: joinObjectKey(releaseKeyRoot, "manifest.json"),
+    contentType: "application/json; charset=utf-8",
+    makeBody: () => JSON.stringify(metadata, null, 2),
+  });
 
   const publicUrl = buildPublicUrl(process.env.S3_PUBLIC_URL, bucket, objectKey);
   const latestKey = joinObjectKey(basePrefix, platform, "latest.json");
@@ -334,7 +408,13 @@ async function main() {
     ...metadata,
     url: publicUrl || null,
   };
-  await uploadObject(s3, bucket, latestKey, JSON.stringify(latestPayload, null, 2), "application/json; charset=utf-8");
+  await uploadObjectWithRetries({
+    s3,
+    bucket,
+    objectKey: latestKey,
+    contentType: "application/json; charset=utf-8",
+    makeBody: () => JSON.stringify(latestPayload, null, 2),
+  });
 
   console.log("[release:r2] Upload complete.");
   if (publicUrl) {
