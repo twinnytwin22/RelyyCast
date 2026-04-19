@@ -1,6 +1,6 @@
 # RelyyCast
 
-![RelyyCast](public/Relyy.png)
+![RelyyCast](public/relyycast_share_image.png)
 
 Broadcast local audio to the internet, instantly.
 
