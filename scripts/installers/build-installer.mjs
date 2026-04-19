@@ -14,12 +14,14 @@
 
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR  = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT   = path.resolve(SCRIPT_DIR, "../..");
 const DIST_SRC    = path.resolve(REPO_ROOT, "dist", "relyycast");
+const WINDOWS_APP_EXE = path.join(DIST_SRC, "relyycast-win_x64.exe");
+const WINDOWS_INSTALLER_EXE = path.join(REPO_ROOT, "dist", "relyycast-setup.exe");
 
 const MAC_SIGNING_ENV_KEYS = [
   "APPLE_SIGN_APP",
@@ -34,6 +36,19 @@ const MAC_SIGNING_ENV_KEYS = [
   "NOTARIZE_PROFILE",
 ];
 
+const WINDOWS_SIGNING_ENV_KEYS = [
+  "WINDOWS_SIGNTOOL_PATH",
+  "WINDOWS_SIGN_CERT_FILE",
+  "WINDOWS_SIGN_CERT_PASSWORD",
+  "WINDOWS_SIGN_CERT_SHA1",
+  "WINDOWS_SIGN_SUBJECT_NAME",
+  "WINDOWS_SIGN_USE_MACHINE_STORE",
+  "WINDOWS_SIGN_TIMESTAMP_URL",
+  "WINDOWS_SIGN_DIGEST",
+];
+
+const INSTALLER_SIGNING_ENV_KEYS = [...MAC_SIGNING_ENV_KEYS, ...WINDOWS_SIGNING_ENV_KEYS];
+
 // Forward flags to sub-scripts
 const forwardArgs = process.argv.slice(2);
 const SKIP_SIGN      = forwardArgs.includes("--skip-sign");
@@ -42,6 +57,22 @@ const SKIP_NOTARIZE  = forwardArgs.includes("--skip-notarize");
 function run(cmd, opts = {}) {
   console.log(`\n$ ${cmd}`);
   execSync(cmd, { stdio: "inherit", ...opts });
+}
+
+function formatCmdForLog(command, args = []) {
+  const quote = (value) => {
+    const text = String(value);
+    if (!/[\s"]/g.test(text)) {
+      return text;
+    }
+    return `"${text.replace(/"/g, "\\\"")}"`;
+  };
+  return [command, ...args].map(quote).join(" ");
+}
+
+function runFile(command, args = [], opts = {}) {
+  console.log(`\n$ ${formatCmdForLog(command, args)}`);
+  execFileSync(command, args, { stdio: "inherit", ...opts });
 }
 
 function parseDotenv(content) {
@@ -82,7 +113,7 @@ function loadInstallerEnvFiles() {
     const parsed = parseDotenv(readFileSync(envPath, "utf8"));
     let assignedCount = 0;
 
-    for (const key of MAC_SIGNING_ENV_KEYS) {
+    for (const key of INSTALLER_SIGNING_ENV_KEYS) {
       if (!process.env[key] && parsed[key]) {
         process.env[key] = parsed[key];
         assignedCount += 1;
@@ -122,6 +153,101 @@ function maybeLoadSiblingElectronNotaryProfile() {
   console.log(`[installer] Reusing notary profile from relyy-radio state: ${profile}`);
 }
 
+function parseBoolean(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function getWindowsSigningConfig() {
+  const certFile = String(process.env.WINDOWS_SIGN_CERT_FILE ?? "").trim();
+  const certPassword = String(process.env.WINDOWS_SIGN_CERT_PASSWORD ?? "").trim();
+  const certSha1 = String(process.env.WINDOWS_SIGN_CERT_SHA1 ?? "").trim();
+  const subjectName = String(process.env.WINDOWS_SIGN_SUBJECT_NAME ?? "").trim();
+  const timestampUrl = String(process.env.WINDOWS_SIGN_TIMESTAMP_URL ?? "http://timestamp.digicert.com").trim();
+  const digest = String(process.env.WINDOWS_SIGN_DIGEST ?? "SHA256").trim().toUpperCase();
+  const useMachineStore = parseBoolean(process.env.WINDOWS_SIGN_USE_MACHINE_STORE);
+
+  const hasIdentity = certFile || certSha1 || subjectName;
+  if (!hasIdentity) {
+    return null;
+  }
+
+  if (certFile && !existsSync(certFile)) {
+    throw new Error(`[installer] WINDOWS_SIGN_CERT_FILE does not exist: ${certFile}`);
+  }
+
+  return {
+    certFile,
+    certPassword,
+    certSha1,
+    subjectName,
+    timestampUrl,
+    digest,
+    useMachineStore,
+  };
+}
+
+function resolveSignToolPath() {
+  const configured = String(process.env.WINDOWS_SIGNTOOL_PATH ?? "").trim();
+  if (configured) {
+    if (!existsSync(configured)) {
+      throw new Error(`[installer] WINDOWS_SIGNTOOL_PATH does not exist: ${configured}`);
+    }
+    return configured;
+  }
+
+  const candidates = [
+    "signtool",
+    "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\x64\\signtool.exe",
+    "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\signtool.exe",
+    "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.22621.0\\x64\\signtool.exe",
+    "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.22000.0\\x64\\signtool.exe",
+    "C:\\Program Files (x86)\\Windows Kits\\10\\App Certification Kit\\signtool.exe",
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      execSync(`"${candidate}" /?`, { stdio: "pipe" });
+      return candidate;
+    } catch {
+      // not found, try next
+    }
+  }
+
+  throw new Error(
+    "[installer] signtool not found. Install Windows SDK signing tools or set WINDOWS_SIGNTOOL_PATH.",
+  );
+}
+
+function signWindowsFile(signtoolPath, signingConfig, targetPath, label) {
+  const args = ["sign", "/v", "/fd", signingConfig.digest];
+
+  if (signingConfig.timestampUrl) {
+    args.push("/tr", signingConfig.timestampUrl, "/td", signingConfig.digest);
+  }
+
+  if (signingConfig.certFile) {
+    args.push("/f", signingConfig.certFile);
+    if (signingConfig.certPassword) {
+      args.push("/p", signingConfig.certPassword);
+    }
+  } else {
+    if (signingConfig.certSha1) {
+      args.push("/sha1", signingConfig.certSha1);
+    }
+    if (signingConfig.subjectName) {
+      args.push("/n", signingConfig.subjectName, "/a");
+    }
+    if (signingConfig.useMachineStore) {
+      args.push("/sm");
+    }
+  }
+
+  args.push(targetPath);
+  console.log(`[installer] Signing ${label}: ${targetPath}`);
+  runFile(signtoolPath, args);
+}
+
 // -------------------------------------------------------------------------
 // Preflight
 // -------------------------------------------------------------------------
@@ -144,6 +270,17 @@ function checkDistSrc() {
 // -------------------------------------------------------------------------
 function buildWindows() {
   const nsiScript = path.join(SCRIPT_DIR, "windows", "relyycast.nsi");
+  const signingConfig = SKIP_SIGN ? null : getWindowsSigningConfig();
+  let signtoolPath = "";
+
+  if (signingConfig) {
+    signtoolPath = resolveSignToolPath();
+    signWindowsFile(signtoolPath, signingConfig, WINDOWS_APP_EXE, "app executable");
+  } else if (SKIP_SIGN) {
+    console.log("[installer] Skipping Windows code signing (--skip-sign).");
+  } else {
+    console.log("[installer] Windows code signing not configured; building unsigned installer.");
+  }
 
   // Detect makensis on PATH or common install locations
   const candidates = [
@@ -194,6 +331,10 @@ function buildWindows() {
 
   run(`"${makensis}" /V3 "${nsiScript}"`);
 
+  if (signingConfig) {
+    signWindowsFile(signtoolPath, signingConfig, WINDOWS_INSTALLER_EXE, "installer");
+  }
+
   console.log("\n[installer] Windows installer: dist\\relyycast-setup.exe");
 }
 
@@ -221,12 +362,12 @@ function buildMac() {
 // -------------------------------------------------------------------------
 console.log("[installer] Checking dist source files...");
 checkDistSrc();
+loadInstallerEnvFiles();
 
 if (process.platform === "win32") {
   console.log("[installer] Building Windows installer (NSIS)...");
   buildWindows();
 } else if (process.platform === "darwin") {
-  loadInstallerEnvFiles();
   maybeLoadSiblingElectronNotaryProfile();
   console.log("[installer] Building macOS installer (.pkg)...");
   buildMac();

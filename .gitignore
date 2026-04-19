@@ -51,6 +51,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# code signing certificates (private keys — never commit)
+certs/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

@@ -1,14 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const DIST_DIR = path.join(REPO_ROOT, "dist");
 
 const ARTIFACT_CANDIDATES = [
   { filePath: path.join(DIST_DIR, "RelyyCast.pkg"), platform: "macos" },
   { filePath: path.join(DIST_DIR, "relyycast-setup.exe"), platform: "windows" },
+  { filePath: path.join(DIST_DIR, "RelyyCast.AppImage"), platform: "linux" },
+  { filePath: path.join(DIST_DIR, "relyycast.AppImage"), platform: "linux" },
+  { filePath: path.join(DIST_DIR, "relyycast-linux-x64.AppImage"), platform: "linux" },
 ];
 
 const ENV_KEYS = ["S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_PREFIX", "S3_KEY", "S3_SECRET", "S3_PUBLIC_URL"];
@@ -107,14 +111,16 @@ function parseArgs(argv) {
 function normalizePlatform(raw) {
   if (!raw) return undefined;
   const value = raw.toLowerCase();
-  if (["mac", "macos", "darwin", "osx"].includes(value)) return "mac";
+  if (["mac", "macos", "darwin", "osx"].includes(value)) return "macos";
   if (["win", "windows", "win32"].includes(value)) return "windows";
+  if (["linux", "gnu/linux", "gnu-linux"].includes(value)) return "linux";
   return value;
 }
 
 function detectHostPlatform() {
-  if (process.platform === "darwin") return "mac";
+  if (process.platform === "darwin") return "macos";
   if (process.platform === "win32") return "windows";
+  if (process.platform === "linux") return "linux";
   return process.platform;
 }
 
@@ -166,8 +172,19 @@ function resolveArtifact(artifactArg, platformHint) {
 }
 
 function inferPlatformFromName(fileName) {
-  if (fileName.endsWith(".pkg")) return "macos";
-  if (fileName.endsWith(".exe")) return "windows";
+  const normalizedFileName = fileName.toLowerCase();
+  if (normalizedFileName.endsWith(".pkg")) return "macos";
+  if (normalizedFileName.endsWith(".exe")) return "windows";
+  if (
+    normalizedFileName.endsWith(".appimage")
+    || normalizedFileName.endsWith(".deb")
+    || normalizedFileName.endsWith(".rpm")
+    || normalizedFileName.endsWith(".snap")
+    || normalizedFileName.endsWith(".tar.gz")
+    || normalizedFileName.endsWith(".tar.xz")
+  ) {
+    return "linux";
+  }
   return "unknown";
 }
 
@@ -264,7 +281,8 @@ async function main() {
   const accessKeyId = requireEnv("S3_KEY");
   const secretAccessKey = requireEnv("S3_SECRET");
   const region = normalizeRegion(endpoint, process.env.S3_REGION);
-  const objectKey = joinObjectKey(basePrefix, platform, version, fileName);
+  const releaseKeyRoot = joinObjectKey(basePrefix, version, platform);
+  const objectKey = joinObjectKey(releaseKeyRoot, fileName);
 
   const metadata = {
     product: "relyycast",
@@ -305,7 +323,7 @@ async function main() {
   await uploadObject(
     s3,
     bucket,
-    joinObjectKey(basePrefix, platform, version, "manifest.json"),
+    joinObjectKey(releaseKeyRoot, "manifest.json"),
     JSON.stringify(metadata, null, 2),
     "application/json; charset=utf-8",
   );

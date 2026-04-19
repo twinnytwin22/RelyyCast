@@ -6,13 +6,13 @@ RelyyCast is a free, open-source desktop app that lets you broadcast a local RTM
 
 | Platform | Installer |
 |---|---|
-| macOS (Apple Silicon + Intel) | [RelyyCast.pkg](https://downloads.relyycast.app/mac/latest/RelyyCast.pkg) |
-| Windows 64-bit | [relyycast-setup.exe](https://downloads.relyycast.app/windows/latest/relyycast-setup.exe) |
+| macOS (Apple Silicon + Intel) | [RelyyCast.pkg](https://download.relyycast.com/installers/releases/0.1.0/macos/RelyyCast.pkg) |
+| Windows 64-bit | [relyycast-setup.exe](https://download.relyycast.com/installers/releases/0.1.0/windows/relyycast-setup.exe) |
 
 SHA-256 checksums are published alongside each release:
 
-- `https://downloads.relyycast.app/mac/latest/RelyyCast.pkg.sha256`
-- `https://downloads.relyycast.app/windows/latest/relyycast-setup.exe.sha256`
+- `https://download.relyycast.com/installers/releases/0.1.0/macos/RelyyCast.pkg.sha256`
+- `https://download.relyycast.com/installers/releases/0.1.0/windows/relyycast-setup.exe.sha256`
 
 ## How it works
 
@@ -36,17 +36,17 @@ The tunnel interface lives in:
 
 RelyyCast publishes a stable `latest.json` at the root of each platform path so apps and scripts can check for updates:
 
-- `https://downloads.relyycast.app/mac/latest.json`
-- `https://downloads.relyycast.app/windows/latest.json`
+- `https://download.relyycast.com/installers/releases/macos/latest.json`
+- `https://download.relyycast.com/installers/releases/windows/latest.json`
 
 ```json
 {
   "product": "relyycast",
   "version": "0.1.0",
   "releaseDate": "2026-04-18",
-  "platform": "mac",
+  "platform": "macos",
   "fileName": "RelyyCast.pkg",
-  "url": "https://downloads.relyycast.app/mac/0.1.0/RelyyCast.pkg",
+  "url": "https://download.relyycast.com/installers/releases/0.1.0/macos/RelyyCast.pkg",
   "sha256": "<hex>",
   "fileSizeBytes": 0
 }
@@ -115,6 +115,38 @@ npm run version:bump:decimal           # x.y.z -> x.y.(z+1)
 npm run installer:build
 npm run release:upload:r2
 ```
+
+### Windows signing (installer:build)
+
+`npm run installer:build` now supports Windows Authenticode signing in-flow.
+
+Set one of these identity modes:
+
+```bash
+# Mode A: PFX file
+WINDOWS_SIGN_CERT_FILE=C:\path\to\crib-llc-code-signing.pfx
+WINDOWS_SIGN_CERT_PASSWORD=your_pfx_password
+
+# Mode B: Windows cert store
+WINDOWS_SIGN_SUBJECT_NAME=CRIB, LLC
+# optional:
+# WINDOWS_SIGN_CERT_SHA1=ABCDEF0123456789ABCDEF0123456789ABCDEF01
+# WINDOWS_SIGN_USE_MACHINE_STORE=true
+```
+
+Optional controls:
+
+```bash
+WINDOWS_SIGNTOOL_PATH=C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe
+WINDOWS_SIGN_TIMESTAMP_URL=http://timestamp.digicert.com
+WINDOWS_SIGN_DIGEST=SHA256
+```
+
+Behavior:
+
+- Signs `dist/relyycast/relyycast-win_x64.exe` before NSIS packaging.
+- Signs `dist/relyycast-setup.exe` after NSIS packaging.
+- Use `npm run installer:build:skip-sign` to force unsigned output.
 
 The upload script pushes the installer, a `.sha256` checksum file, a versioned `manifest.json`, and an updated `latest.json` to the configured R2 bucket. Set these env vars (or add them to `.env.release.local`):
 
