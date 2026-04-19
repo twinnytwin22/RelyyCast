@@ -53,6 +53,7 @@ export function StationConsole() {
   const normalizedRelayPath = relayPath.replace(/^\/+|\/+$/g, "") || "live";
 
   const mp3Enabled = runtimeState?.config.mp3Enabled ?? serverConfig.mp3Enabled;
+  const isDevBuild = import.meta.env.DEV;
   const inputUrl = runtimeState?.config.inputUrl || serverConfig.inputUrl || DEFAULT_SERVER_CONFIG.inputUrl;
   const parsedInputUrl = useMemo(() => parseHttpInputUrl(inputUrl), [inputUrl]);
   const mountPath = normalizeMountPath(parsedInputUrl?.pathname);
@@ -60,8 +61,14 @@ export function StationConsole() {
   const localStreamUrl = `${inputOrigin}${mountPath}`;
   const publicOrigin = runtimeState?.cloudflare.publicUrl?.replace(/\/+$/g, "") || "";
   const streamUrl = mp3Enabled ? (publicOrigin ? `${publicOrigin}${mountPath}` : localStreamUrl) : "---";
-  const mp3HealthUrl = useMemo(() => buildMp3HealthUrl(parsedInputUrl), [parsedInputUrl]);
-  const mp3HealthDevProxyUrl = useMemo(() => buildMp3HealthDevProxyUrl(parsedInputUrl), [parsedInputUrl]);
+  const mp3HealthUrl = useMemo(
+    () => (isDevBuild ? buildMp3HealthUrl(parsedInputUrl) : null),
+    [isDevBuild, parsedInputUrl],
+  );
+  const mp3HealthDevProxyUrl = useMemo(
+    () => (isDevBuild ? buildMp3HealthDevProxyUrl(parsedInputUrl) : null),
+    [isDevBuild, parsedInputUrl],
+  );
 
   const relayRunning = runtimeState?.processes.mediamtx.running === true;
   const ingestRunning = runtimeState?.processes.ffmpegIngest.running === true;

@@ -57,15 +57,18 @@ async function resolveMediatxPath(config: RuntimeConfig) {
   }
 
   const roots = deriveRuntimeRoots();
-  const platform = getPlatformName();
+  const platformName = getPlatformName();
+  const platformFolder = platformName === "darwin" ? "mac" : platformName === "windows" ? "win" : "linux";
   const candidates = isWindows()
     ? roots.flatMap((root) => [
       joinPath(root, "build", "mediamtx", "win", "mediamtx.exe"),
+      joinPath(root, "binaries", "mediamtx", "win", "mediamtx.exe"),
       joinPath(root, "mediamtx", "win", "mediamtx.exe"),
     ])
     : roots.flatMap((root) => [
-      joinPath(root, "build", "mediamtx", platform === "darwin" ? "mac" : "linux", "mediamtx"),
-      joinPath(root, "mediamtx", platform === "darwin" ? "mac" : "linux", "mediamtx"),
+      joinPath(root, "build", "mediamtx", platformFolder, "mediamtx"),
+      joinPath(root, "binaries", "mediamtx", platformFolder, "mediamtx"),
+      joinPath(root, "mediamtx", platformFolder, "mediamtx"),
       joinPath(root, "build", "bin", "mediamtx"),
       joinPath(root, "bin", "mediamtx"),
     ]);
@@ -87,6 +90,7 @@ async function resolveMediatxConfigPath(config: RuntimeConfig) {
   const roots = deriveRuntimeRoots();
   const candidates = roots.flatMap((root) => [
     joinPath(root, "build", "mediamtx", "mediamtx.yml"),
+    joinPath(root, "binaries", "mediamtx", "mediamtx.yml"),
     joinPath(root, "mediamtx", "mediamtx.yml"),
     joinPath(root, "server", "mediamtx.yml"),
   ]);

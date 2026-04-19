@@ -54,6 +54,9 @@ export function deriveRuntimeRoots() {
   const nlPath = (window.NL_PATH ?? "").trim();
   const nlCwd = (window.NL_CWD ?? "").trim();
   const roots = dedupeStrings([nlPath, nlCwd]);
+  if (!roots.length) {
+    roots.push(".");
+  }
 
   for (const root of [...roots]) {
     const normalized = root.replace(/\\/g, "/").toLowerCase();

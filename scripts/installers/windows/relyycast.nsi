@@ -65,6 +65,17 @@ RequestExecutionLevel admin
 !insertmacro MUI_LANGUAGE "English"
 
 ; -----------------------------------------------------------------------
+; Installer Init
+; -----------------------------------------------------------------------
+Function .onInit
+  ; Best-effort: stop running processes that can lock binaries during upgrade.
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM ${APP_EXE} /T'
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM mediamtx.exe /T'
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM cloudflared.exe /T'
+  Sleep 500
+FunctionEnd
+
+; -----------------------------------------------------------------------
 ; Version Info (shown in Properties > Details)
 ; -----------------------------------------------------------------------
 VIProductVersion "0.1.0.0"
@@ -88,14 +99,34 @@ Section "!${APP_NAME} (required)" SEC_CORE
 
   ; MediaMTX streaming server
   SetOutPath "$INSTDIR\build\mediamtx\win"
-  File "${DIST_SRC}\build\mediamtx\win\mediamtx.exe"
+  ClearErrors
+  File /nonfatal "${DIST_SRC}\build\mediamtx\win\mediamtx.exe"
+  IfErrors 0 mediamtx_done
+    ExecWait '"$SYSDIR\taskkill.exe" /F /IM mediamtx.exe /T'
+    Sleep 500
+    ClearErrors
+    File /nonfatal "${DIST_SRC}\build\mediamtx\win\mediamtx.exe"
+    IfErrors 0 mediamtx_done
+      MessageBox MB_ICONSTOP|MB_OK "Failed to install mediamtx.exe. Close RelyyCast and retry."
+      Abort
+  mediamtx_done:
 
   SetOutPath "$INSTDIR\build\mediamtx"
   File "${DIST_SRC}\build\mediamtx\mediamtx.yml"
 
   ; Cloudflare Tunnel binary
   SetOutPath "$INSTDIR\build\bin"
-  File "${DIST_SRC}\build\bin\cloudflared.exe"
+  ClearErrors
+  File /nonfatal "${DIST_SRC}\build\bin\cloudflared.exe"
+  IfErrors 0 cloudflared_done
+    ExecWait '"$SYSDIR\taskkill.exe" /F /IM cloudflared.exe /T'
+    Sleep 500
+    ClearErrors
+    File /nonfatal "${DIST_SRC}\build\bin\cloudflared.exe"
+    IfErrors 0 cloudflared_done
+      MessageBox MB_ICONSTOP|MB_OK "Failed to install cloudflared.exe. Close RelyyCast and retry."
+      Abort
+  cloudflared_done:
 
   ; Registry: install location + version
   WriteRegStr HKLM "${REG_KEY}" "InstallDir" "$INSTDIR"

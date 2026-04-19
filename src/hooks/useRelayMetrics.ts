@@ -39,10 +39,12 @@ export function useRelayMetrics({
     let alive = true;
 
     async function poll() {
-      // Try dev proxy first (avoids CORS in Vite dev mode), fall back to direct.
-      const mp3Candidates = [mp3HealthDevProxyUrl, mp3HealthUrl].filter(
-        (c): c is string => typeof c === "string" && c.length > 0,
-      );
+      // If proxy is available, do not fall back to direct cross-origin health checks.
+      const mp3Candidates = (
+        typeof mp3HealthDevProxyUrl === "string" && mp3HealthDevProxyUrl.length > 0
+          ? [mp3HealthDevProxyUrl]
+          : [mp3HealthUrl]
+      ).filter((c): c is string => typeof c === "string" && c.length > 0);
 
       const mp3Request = (async () => {
         for (const candidate of mp3Candidates) {
