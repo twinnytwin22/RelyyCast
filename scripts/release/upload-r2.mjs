@@ -247,14 +247,19 @@ function parseBucketAndPrefix(rawBucket) {
   return { bucket, impliedPrefix: rest.join("/") };
 }
 
-async function uploadObject(s3, bucket, objectKey, body, contentType) {
+async function uploadObject(s3, bucket, objectKey, body, contentType, contentLength) {
+  const params = {
+    Bucket: bucket,
+    Key: objectKey,
+    Body: body,
+    ContentType: contentType,
+  };
+  if (typeof contentLength === "number") {
+    params.ContentLength = contentLength;
+  }
+
   await s3.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: objectKey,
-      Body: body,
-      ContentType: contentType,
-    }),
+    new PutObjectCommand(params),
   );
 }
 
@@ -291,13 +296,14 @@ async function uploadObjectWithRetries({
   bucket,
   objectKey,
   contentType,
+  contentLength,
   makeBody,
   maxAttempts = 4,
   initialBackoffMs = 750,
 }) {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      await uploadObject(s3, bucket, objectKey, makeBody(), contentType);
+      await uploadObject(s3, bucket, objectKey, makeBody(), contentType, contentLength);
       if (attempt > 1) {
         console.log(`[release:r2] Upload recovered after retry ${attempt}/${maxAttempts}: ${objectKey}`);
       }
@@ -342,7 +348,8 @@ async function main() {
   const accessKeyId = requireEnv("S3_KEY");
   const secretAccessKey = requireEnv("S3_SECRET");
   const region = normalizeRegion(endpoint, process.env.S3_REGION);
-  const releaseKeyRoot = joinObjectKey(basePrefix, version, platform);
+  const releasesPrefix = joinObjectKey(basePrefix, "releases");
+  const releaseKeyRoot = joinObjectKey(releasesPrefix, version, platform);
   const objectKey = joinObjectKey(releaseKeyRoot, fileName);
 
   const metadata = {
@@ -379,13 +386,15 @@ async function main() {
     credentials: { accessKeyId, secretAccessKey },
     maxAttempts: 1,
   });
+  const artifactBody = fs.readFileSync(artifact.filePath);
 
   await uploadObjectWithRetries({
     s3,
     bucket,
     objectKey,
     contentType: "application/octet-stream",
-    makeBody: () => fs.createReadStream(artifact.filePath),
+    contentLength: artifactBody.length,
+    makeBody: () => artifactBody,
   });
   await uploadObjectWithRetries({
     s3,
@@ -403,7 +412,7 @@ async function main() {
   });
 
   const publicUrl = buildPublicUrl(process.env.S3_PUBLIC_URL, bucket, objectKey);
-  const latestKey = joinObjectKey(basePrefix, platform, "latest.json");
+  const latestKey = joinObjectKey(releasesPrefix, platform, "latest.json");
   const latestPayload = {
     ...metadata,
     url: publicUrl || null,

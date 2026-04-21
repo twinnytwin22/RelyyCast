@@ -11,6 +11,7 @@ import {
   setStoppedProcessState,
 } from "./orchestrator/runtime-state";
 import { RuntimeStateStore } from "./orchestrator/runtime-state-store";
+import { getPlatformName } from "./orchestrator/runtime-platform";
 import { showTrayCloseHintOnce } from "./tray-close-hint";
 import {
   RUNTIME_STATE_EVENT_NAME,
@@ -39,6 +40,9 @@ let trayInitialized = false;
 const TRAY_ITEM_SHOW = "show";
 const TRAY_ITEM_HIDE = "hide";
 const TRAY_ITEM_EXIT = "exit";
+const DEFAULT_TRAY_ICON = "/favicon.ico";
+const MACOS_TRAY_ICON_LIGHT_MODE = "/tray_icon_dark_20.png";
+const MACOS_TRAY_ICON_DARK_MODE = "/tray_icon_light_20.png";
 
 type TrayMenuItemClickedDetail = {
   id?: unknown;
@@ -86,22 +90,53 @@ async function hideMainWindow() {
   }
 }
 
+function getTrayMenuItems() {
+  return [
+    { id: TRAY_ITEM_SHOW, text: "Show App" },
+    { id: TRAY_ITEM_HIDE, text: "Hide App" },
+    { id: TRAY_ITEM_EXIT, text: "Exit" },
+  ];
+}
+
+function prefersDarkColorScheme() {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return false;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function getMacTrayIconPath() {
+  return prefersDarkColorScheme() ? MACOS_TRAY_ICON_DARK_MODE : MACOS_TRAY_ICON_LIGHT_MODE;
+}
+
 async function setupTrayMenu() {
   if (trayInitialized) {
     return;
   }
 
+  const isMac = getPlatformName() === "darwin";
+  const trayIconPath = isMac ? getMacTrayIconPath() : DEFAULT_TRAY_ICON;
+
   try {
     await os.setTray({
-      icon: "/favicon.ico",
-      menuItems: [
-        { id: TRAY_ITEM_SHOW, text: "Show App" },
-        { id: TRAY_ITEM_HIDE, text: "Hide App" },
-        { id: TRAY_ITEM_EXIT, text: "Exit" },
-      ],
+      icon: trayIconPath,
+      menuItems: getTrayMenuItems(),
     });
     trayInitialized = true;
   } catch (error) {
+    if (isMac) {
+      try {
+        await os.setTray({
+          icon: DEFAULT_TRAY_ICON,
+          menuItems: getTrayMenuItems(),
+        });
+        trayInitialized = true;
+        return;
+      } catch (fallbackError) {
+        console.warn("[runtime] fallback tray icon initialization failed:", fallbackError);
+      }
+    }
     console.warn("[runtime] failed to initialize tray menu:", error);
   }
 }
