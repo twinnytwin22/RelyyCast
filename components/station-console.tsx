@@ -124,7 +124,7 @@ export function StationConsole() {
     runtimeConfigSignature.current = signature;
     setServerConfig(normalized);
     writeStoredConfig(normalized);
-    setSettingsStatus("Synced from runtime.");
+    setSettingsStatus("Connected");
     setSettingsError(null);
   }, [runtimeState]);
 
@@ -205,7 +205,7 @@ export function StationConsole() {
 
   const currentTimeLabel = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const currentDateLabel = now.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
-  const runtimePhaseLabel = runtimeState?.phase?.toUpperCase() ?? "STARTING";
+  const runtimePhaseLabel = runtimeState?.phase?.toUpperCase() ?? "Starting";
   const relayReadyBadge = streamHealth?.relayPathReady ? "Ready" : "Pending";
   const cloudflareBadge = runtimeState?.cloudflare.status ?? "pending-consent";
 

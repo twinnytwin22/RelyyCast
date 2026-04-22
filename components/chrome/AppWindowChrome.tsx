@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
-import { BadgeQuestionMark, CircleQuestionMark, Minimize2, Moon, Sun, X } from "lucide-react";
+import { BadgeQuestionMark, CircleQuestionMark, Minimize, Minimize2, MinusIcon, Moon, Sun, X } from "lucide-react";
 import {
   window as nlWindow,
   init as nlInit,
@@ -372,7 +372,7 @@ export default function AppWindowChrome({
               onMouseDown={(event) => {
                 event.stopPropagation();
               }}
-              onClick={() => handleOpenLink({ link: "https://relyy.app/docs" })}
+              onClick={() => handleOpenLink({ link: "https://docs.relyy.app" })}
               className="block w-full rounded-sm px-2 py-1 text-left hover:bg-white/10"
             >
               Documentation
@@ -385,7 +385,7 @@ export default function AppWindowChrome({
               onMouseDown={(event) => {
                 event.stopPropagation();
               }}
-              onClick={() => handleOpenLink({ link: "https://relyy.app/support" })}
+              onClick={() => handleOpenLink({ link: "https://support.relyy.app" })}
               className="block w-full rounded-sm px-2 py-1 text-left hover:bg-white/10"
             >
               Support
@@ -445,7 +445,7 @@ export default function AppWindowChrome({
               disabled={!neutralinoReady}
               className="inline-flex h-7 w-7 items-center justify-center rounded-sm border border-[hsl(var(--theme-border))] bg-[hsl(var(--theme-surface-alt))] text-[11px] font-bold transition-colors hover:bg-white/70 dark:hover:bg-white/5"
             >
-              <Minimize2 className="h-3.5 w-3.5" />
+              <MinusIcon className="h-3.5 w-3.5" />
             </button>
             <button
               type="button"
