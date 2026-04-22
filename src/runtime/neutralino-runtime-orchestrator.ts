@@ -40,9 +40,9 @@ let trayInitialized = false;
 const TRAY_ITEM_SHOW = "show";
 const TRAY_ITEM_HIDE = "hide";
 const TRAY_ITEM_EXIT = "exit";
-const DEFAULT_TRAY_ICON = "/favicon.ico";
-const MACOS_TRAY_ICON_LIGHT_MODE = "/tray_icon_dark_20.png";
-const MACOS_TRAY_ICON_DARK_MODE = "/tray_icon_light_20.png";
+const DEFAULT_TRAY_ICON = "/app/favicon.ico";
+const MACOS_TRAY_ICON_LIGHT_MODE = "/app/tray_black_20.png";
+const MACOS_TRAY_ICON_DARK_MODE = "/app/tray_white_20.png";
 
 type TrayMenuItemClickedDetail = {
   id?: unknown;
