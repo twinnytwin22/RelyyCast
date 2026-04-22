@@ -19,6 +19,8 @@ import {
   type StartManagedProcessOptions,
 } from "./runtime-types";
 
+const CLOUDFLARE_LOGIN_RESUME_POLL_MS = 2500;
+
 type ProcessSupervisorDeps = {
   getRuntimeState: () => RuntimeState | null;
   isRuntimeStopping: () => boolean;
@@ -33,6 +35,7 @@ type ProcessSupervisorDeps = {
 export class RuntimeProcessSupervisor {
   private readonly processBySpawnId = new Map<number, ManagedProcessName>();
   private readonly restartTimers = new Map<ManagedProcessName, number>();
+  private cloudflareLoginResumeTimer: number | null = null;
 
   constructor(private readonly deps: ProcessSupervisorDeps) {}
 
@@ -73,6 +76,28 @@ export class RuntimeProcessSupervisor {
 
   cancelRestart(name: ManagedProcessName) {
     this.clearRestartTimer(name);
+    if (name === "cloudflared") {
+      this.clearCloudflareLoginResumeTimer();
+    }
+  }
+
+  private clearCloudflareLoginResumeTimer() {
+    if (!this.cloudflareLoginResumeTimer) {
+      return;
+    }
+    window.clearTimeout(this.cloudflareLoginResumeTimer);
+    this.cloudflareLoginResumeTimer = null;
+  }
+
+  private scheduleCloudflareLoginResume() {
+    if (this.cloudflareLoginResumeTimer) {
+      return;
+    }
+
+    this.cloudflareLoginResumeTimer = window.setTimeout(() => {
+      this.cloudflareLoginResumeTimer = null;
+      void this.startManagedProcess("cloudflared", { cloudflareTrigger: "retry" });
+    }, CLOUDFLARE_LOGIN_RESUME_POLL_MS);
   }
 
   private clearRestartTimer(name: ManagedProcessName) {
@@ -172,6 +197,9 @@ export class RuntimeProcessSupervisor {
     }
 
     this.clearRestartTimer(name);
+    if (name === "cloudflared") {
+      this.clearCloudflareLoginResumeTimer();
+    }
 
     try {
       const launch = await buildLaunchForProcess(
@@ -190,6 +218,13 @@ export class RuntimeProcessSupervisor {
               : { lastError: null }),
           });
         });
+
+        if (name === "cloudflared") {
+          const nextState = this.deps.getRuntimeState();
+          if (nextState?.cloudflare.status === "login-required") {
+            this.scheduleCloudflareLoginResume();
+          }
+        }
         return;
       }
 
@@ -242,6 +277,9 @@ export class RuntimeProcessSupervisor {
     }
 
     this.clearRestartTimer(name);
+    if (name === "cloudflared") {
+      this.clearCloudflareLoginResumeTimer();
+    }
     const current = state.processes[name];
     const spawnId = current.spawnId;
     if (typeof spawnId === "number") {

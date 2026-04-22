@@ -288,6 +288,12 @@ async function runCommand(executable: string, args: string[], cwd: string): Prom
   };
 }
 
+function startCommandInBackground(executable: string, args: string[], cwd: string) {
+  const normalizedExecutable = normalizeExecutableForCommand(executable);
+  const command = buildCommand(normalizedExecutable, args);
+  return os.execCommand(command, { cwd });
+}
+
 function extractTunnelId(text: string) {
   const match = text.match(TUNNEL_ID_PATTERN);
   return match ? match[0] : null;
@@ -392,31 +398,6 @@ async function findCloudflareCert(defaultDirectories: string[], appCertPath: str
       return candidate;
     }
   }
-  return null;
-}
-
-async function waitForCloudflareCert(
-  defaultDirectories: string[],
-  appCertPath: string,
-  timeoutMs = 15_000,
-) {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() <= deadline) {
-    const discoveredPath = await findCloudflareCert(defaultDirectories, appCertPath);
-    if (discoveredPath) {
-      if (discoveredPath !== appCertPath) {
-        await copyFile(discoveredPath, appCertPath);
-      }
-
-      if (await pathExists(appCertPath)) {
-        return appCertPath;
-      }
-    }
-
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-  }
-
   return null;
 }
 
@@ -623,42 +604,28 @@ async function ensureCloudflareCert(
     };
   }
 
-  const promptedAt = nowIso();
-  const loginResult = await runCommand(
-    cloudflaredPath,
-    ["tunnel", "login"],
-    cwd,
-  );
-  if (loginResult.exitCode !== 0 && !(await pathExists(appCertPath))) {
+  if (trigger === "retry") {
     return {
       certPath: null,
       loginRequired: true,
-      message: loginResult.stdErr || loginResult.stdOut || "cloudflared tunnel login did not complete",
-      lastUserPromptAt: promptedAt,
+      message: "Cloudflare login is still pending. Complete browser auth and setup will continue automatically.",
+      lastUserPromptAt: null,
     };
   }
 
-  const discoveredCertPath = await waitForCloudflareCert(defaultDirectories, appCertPath);
-  if (discoveredCertPath) {
-    return {
-      certPath: discoveredCertPath,
-      loginRequired: false,
-      message: null,
-      lastUserPromptAt: promptedAt,
-    };
-  }
-
-  const fallback = await findCloudflareCert(defaultDirectories, appCertPath);
-  if (fallback && fallback !== appCertPath) {
-    await copyFile(fallback, appCertPath);
-  }
+  const promptedAt = nowIso();
+  void startCommandInBackground(
+    cloudflaredPath,
+    ["tunnel", "login"],
+    cwd,
+  ).catch(() => {
+    // Login command can fail immediately if browser launch is blocked.
+  });
 
   return {
-    certPath: (await pathExists(appCertPath)) ? appCertPath : null,
-    loginRequired: !(await pathExists(appCertPath)),
-    message: (await pathExists(appCertPath))
-      ? null
-      : "cloudflared login completed but cert.pem was not found",
+    certPath: null,
+    loginRequired: true,
+    message: "Browser login opened. Complete Cloudflare auth to continue tunnel setup.",
     lastUserPromptAt: promptedAt,
   };
 }
