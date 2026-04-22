@@ -180,7 +180,7 @@ export function ControlTab({
           >
             Open MP3
           </ActionButton>
-          <span hidden={!mp3Enabled} className="text-[60%] mt-2 mx-auto">Want to enable MP3?
+          <span hidden={mp3Enabled} className="text-[60%] mt-2 mx-auto">Want to enable MP3?
           <a onClick={() => { void nlOs.open('https://www.gyan.dev/ffmpeg/builds/ffmpeg-git-essentials.7z') }} className="underline" href="https://ffmpeg.org/download.html" target="_blank" rel="noopener noreferrer"> Install FFMPEG,</a> </span>
           </div>
           <ActionButton onClick={() => { void nlOs.open(hlsUrl); }}>
