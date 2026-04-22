@@ -187,8 +187,8 @@ export function StationConsole() {
       .then((nextState) => {
         if (nextState) {
           setRuntimeState(nextState);
-          if (action !== "skip" && nextState.cloudflare.status !== "ready") {
-            throw new Error(nextState.cloudflare.message || `Cloudflare setup is ${nextState.cloudflare.status}.`);
+          if (action !== "skip" && nextState.cloudflare.status === "error") {
+            throw new Error(nextState.cloudflare.message || "Cloudflare setup failed.");
           }
         }
       })
