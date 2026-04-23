@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  checkForUpdatesNow,
+  dismissUpdateNotice,
+  installDownloadedUpdate,
   requestCloudflareLogin,
   retryCloudflareSetup,
   skipCloudflareForNow,
@@ -159,6 +162,18 @@ export function StationConsole() {
     }
   }
 
+  function handleCheckForUpdates() {
+    void checkForUpdatesNow();
+  }
+
+  function handleInstallUpdate() {
+    void installDownloadedUpdate();
+  }
+
+  function handleDismissUpdate() {
+    dismissUpdateNotice();
+  }
+
   async function saveAndConnect() {
     await saveServerConfig();
     runCloudflareAction("connect");
@@ -208,6 +223,12 @@ export function StationConsole() {
   const runtimePhaseLabel = runtimeState?.phase?.toUpperCase() ?? "Starting";
   const relayReadyBadge = streamHealth?.relayPathReady ? "Ready" : "Pending";
   const cloudflareBadge = runtimeState?.cloudflare.status ?? "pending-consent";
+  const updateStatus = runtimeState?.update;
+  const showUpdateBadge =
+    (updateStatus?.status === "available"
+      || updateStatus?.status === "downloaded"
+      || updateStatus?.status === "ready-to-install")
+    && !updateStatus.dismissed;
 
   const sharedCloudflareProps = {
     onSaveAndConnect: () => { void saveAndConnect(); },
@@ -281,6 +302,10 @@ export function StationConsole() {
               isSavingSettings={isSavingSettings}
               onSettingsFieldChange={updateServerConfig}
               onSaveSettings={() => { void saveServerConfig(); }}
+              updateState={runtimeState?.update ?? null}
+              onCheckForUpdates={handleCheckForUpdates}
+              onInstallUpdate={handleInstallUpdate}
+              onDismissUpdate={handleDismissUpdate}
             />
           )}
         </div>
@@ -292,6 +317,7 @@ export function StationConsole() {
             { label: "Phase", value: runtimePhaseLabel },
             { label: "Relay", value: relayReadyBadge },
             { label: "CF", value: cloudflareBadge },
+            ...(showUpdateBadge ? [{ label: "Update", value: "Available" }] : []),
           ]}
         />
       </section>

@@ -11,6 +11,7 @@ import {
   setStoppedProcessState,
 } from "./orchestrator/runtime-state";
 import { RuntimeStateStore } from "./orchestrator/runtime-state-store";
+import { RuntimeUpdateService } from "./orchestrator/runtime-update-service";
 import { getPlatformName } from "./orchestrator/runtime-platform";
 import { showTrayCloseHintOnce } from "./tray-close-hint";
 import {
@@ -25,11 +26,14 @@ export type {
   CloudflareMode,
   RuntimeConfig,
   RuntimeState,
+  UpdateCheckState,
+  UpdateStatus,
 } from "./orchestrator/runtime-types";
 
 export { RUNTIME_STATE_EVENT_NAME };
 
 const stateStore = new RuntimeStateStore();
+const updateService = new RuntimeUpdateService(stateStore);
 
 let runtimeStartPromise: Promise<void> | null = null;
 let runtimeStopping = false;
@@ -212,6 +216,7 @@ export async function stopRuntimeOrchestration(reason: string) {
   }
 
   runtimeStopping = true;
+  updateService.stopAutoScheduler();
   stateStore.updateRuntimeState((current) => {
     current.phase = "stopping";
     current.lastError = reason;
@@ -239,6 +244,8 @@ async function startRuntimeOrchestrationInternal() {
     current.phase = "running";
     current.lastError = null;
   });
+
+  updateService.startAutoScheduler();
 }
 
 export function ensureRuntimeOrchestrationStarted() {
@@ -371,6 +378,32 @@ export function getRuntimeStateSnapshot() {
 
 export async function getPersistedRuntimeStateSnapshot() {
   return stateStore.getPersistedRuntimeStateSnapshot();
+}
+
+export async function checkForUpdatesNow() {
+  await updateService.checkForUpdates();
+  return getRuntimeStateSnapshot();
+}
+
+export async function downloadUpdateNow() {
+  await updateService.downloadUpdate();
+  return getRuntimeStateSnapshot();
+}
+
+export async function installDownloadedUpdate() {
+  await updateService.installUpdate();
+  // On Windows the installer launches and we exit. On macOS the pkg opens
+  // and the user completes install separately, so we leave the app running.
+  const platform = String(window.NL_OS ?? "").toLowerCase();
+  if (platform.includes("windows")) {
+    await requestApplicationExit("update-install");
+  }
+  return getRuntimeStateSnapshot();
+}
+
+export function dismissUpdateNotice() {
+  updateService.dismissUpdateNotice();
+  return getRuntimeStateSnapshot();
 }
 
 export async function updateRuntimeConfig(input: Partial<RuntimeConfig>) {

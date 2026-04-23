@@ -6,6 +6,7 @@ import {
   type RuntimeConfig,
   type RuntimeProcessState,
   type RuntimeState,
+  type UpdateCheckState,
 } from "./runtime-types";
 
 export function nowIso() {
@@ -52,6 +53,23 @@ function createDefaultConfig(): RuntimeConfig {
     cloudflareTunnelName: "",
     cloudflareHostname: "",
     cloudflareConfigPath: "",
+    updatesAutoEnabled: true,
+    updatesCheckIntervalHours: 24,
+  };
+}
+
+export function createDefaultUpdateState(): UpdateCheckState {
+  return {
+    status: "idle",
+    currentVersion: null,
+    latestVersion: null,
+    lastCheckedAt: null,
+    lastError: null,
+    downloadUrl: null,
+    downloadedInstallerPath: null,
+    checksumExpected: null,
+    checksumActual: null,
+    dismissed: false,
   };
 }
 
@@ -83,7 +101,7 @@ function createDefaultCloudflareState(): CloudflareOnboardingState {
 
 export function createRuntimeStateTemplate(appDataDirectory: string, stateFilePath: string): RuntimeState {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     startedAt: nowIso(),
     lastUpdatedAt: nowIso(),
     appDataDirectory,
@@ -97,6 +115,7 @@ export function createRuntimeStateTemplate(appDataDirectory: string, stateFilePa
       ffmpegIngest: createProcessState(),
       cloudflared: createProcessState(),
     },
+    update: createDefaultUpdateState(),
   };
 }
 
@@ -158,6 +177,13 @@ export function normalizeRuntimeConfig(source: unknown): RuntimeConfig {
   const base = createDefaultConfig();
   const cloudflareHostname = sanitizeText(input.cloudflareHostname, 220) || base.cloudflareHostname;
 
+  const updatesCheckIntervalHours =
+    typeof input.updatesCheckIntervalHours === "number"
+    && Number.isFinite(input.updatesCheckIntervalHours)
+    && input.updatesCheckIntervalHours >= 1
+      ? Math.floor(input.updatesCheckIntervalHours)
+      : base.updatesCheckIntervalHours;
+
   return {
     mp3Enabled: normalizeBoolean(input.mp3Enabled, base.mp3Enabled),
     inputUrl: sanitizeText(input.inputUrl, 500) || base.inputUrl,
@@ -177,6 +203,38 @@ export function normalizeRuntimeConfig(source: unknown): RuntimeConfig {
     cloudflareTunnelName: sanitizeText(input.cloudflareTunnelName, 120) || base.cloudflareTunnelName,
     cloudflareHostname,
     cloudflareConfigPath: normalizeExecutablePath(input.cloudflareConfigPath),
+    updatesAutoEnabled: normalizeBoolean(input.updatesAutoEnabled, base.updatesAutoEnabled),
+    updatesCheckIntervalHours,
+  };
+}
+
+export function mergePersistedUpdateState(
+  base: UpdateCheckState,
+  source: unknown,
+): UpdateCheckState {
+  const input = source && typeof source === "object" ? (source as Partial<UpdateCheckState>) : {};
+
+  const isValidUpdateStatus = (v: unknown): v is UpdateCheckState["status"] =>
+    v === "idle" || v === "checking" || v === "up-to-date" || v === "available"
+    || v === "downloading" || v === "downloaded" || v === "ready-to-install"
+    || v === "installing" || v === "error";
+
+  return {
+    status: isValidUpdateStatus(input.status) ? input.status : base.status,
+    currentVersion: typeof input.currentVersion === "string" ? input.currentVersion : base.currentVersion,
+    latestVersion: typeof input.latestVersion === "string" ? input.latestVersion : base.latestVersion,
+    lastCheckedAt: typeof input.lastCheckedAt === "string" ? input.lastCheckedAt : base.lastCheckedAt,
+    lastError: typeof input.lastError === "string" ? input.lastError : base.lastError,
+    downloadUrl: typeof input.downloadUrl === "string" ? input.downloadUrl : base.downloadUrl,
+    downloadedInstallerPath:
+      typeof input.downloadedInstallerPath === "string"
+        ? input.downloadedInstallerPath
+        : base.downloadedInstallerPath,
+    checksumExpected:
+      typeof input.checksumExpected === "string" ? input.checksumExpected : base.checksumExpected,
+    checksumActual:
+      typeof input.checksumActual === "string" ? input.checksumActual : base.checksumActual,
+    dismissed: false,
   };
 }
 

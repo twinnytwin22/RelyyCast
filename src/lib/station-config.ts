@@ -21,6 +21,7 @@ export const DEFAULT_SERVER_CONFIG: ServerConfig = {
   cloudflareMode: "named",
   cloudflareHostname: "",
   cloudflareTunnelName: "relyycast-local",
+  updatesAutoEnabled: true,
 };
 
 function normalizeCloudflareMode(value: unknown): CloudflareMode {
@@ -55,6 +56,10 @@ export function normalizeServerConfig(input: unknown): ServerConfig {
       typeof src.cloudflareTunnelName === "string"
         ? src.cloudflareTunnelName
         : DEFAULT_SERVER_CONFIG.cloudflareTunnelName,
+    updatesAutoEnabled:
+      typeof src.updatesAutoEnabled === "boolean"
+        ? src.updatesAutoEnabled
+        : DEFAULT_SERVER_CONFIG.updatesAutoEnabled,
   };
 }
 
@@ -78,6 +83,7 @@ export function mapServerConfigToRuntimeConfig(config: ServerConfig): Partial<Ru
     cloudflareMode: normalized.cloudflareMode,
     cloudflareHostname: normalized.cloudflareHostname,
     cloudflareTunnelName: normalized.cloudflareTunnelName,
+    updatesAutoEnabled: normalized.updatesAutoEnabled,
   };
 }
 

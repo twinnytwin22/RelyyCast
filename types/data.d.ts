@@ -14,6 +14,7 @@ type ServerConfig = {
   cloudflareMode: CloudflareMode;
   cloudflareHostname: string;
   cloudflareTunnelName: string;
+  updatesAutoEnabled: boolean;
 };
 
 type ProcessRuntime = {

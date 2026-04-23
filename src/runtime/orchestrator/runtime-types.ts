@@ -5,6 +5,30 @@ export type ManagedProcessName =
   | "ffmpegIngest"
   | "cloudflared";
 
+export type UpdateStatus =
+  | "idle"
+  | "checking"
+  | "up-to-date"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "ready-to-install"
+  | "installing"
+  | "error";
+
+export type UpdateCheckState = {
+  status: UpdateStatus;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+  downloadUrl: string | null;
+  downloadedInstallerPath: string | null;
+  checksumExpected: string | null;
+  checksumActual: string | null;
+  dismissed: boolean;
+};
+
 export type RuntimeProcessState = {
   running: boolean;
   spawnId: number | null;
@@ -40,10 +64,12 @@ export type RuntimeConfig = {
   cloudflareTunnelName: string;
   cloudflareHostname: string;
   cloudflareConfigPath: string;
+  updatesAutoEnabled: boolean;
+  updatesCheckIntervalHours: number;
 };
 
 export type RuntimeState = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   startedAt: string;
   lastUpdatedAt: string;
   appDataDirectory: string;
@@ -53,6 +79,7 @@ export type RuntimeState = {
   config: RuntimeConfig;
   cloudflare: CloudflareOnboardingState;
   processes: Record<ManagedProcessName, RuntimeProcessState>;
+  update: UpdateCheckState;
 };
 
 export type SpawnedProcessEventDetail = {
@@ -65,6 +92,19 @@ export type RuntimeWindow = Window & {
   __nlReady?: boolean;
   __relyyNeutralinoReady?: boolean;
   __relyyRuntimeState?: RuntimeState;
+};
+
+export type LatestManifest = {
+  product: string;
+  version: string;
+  platform: string;
+  fileName: string;
+  objectKey: string;
+  sha256: string;
+  fileSizeBytes: number;
+  builtAt: string;
+  uploadedAt: string;
+  url: string | null;
 };
 
 export type ProcessLaunch = {

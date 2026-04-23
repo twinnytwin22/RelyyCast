@@ -9,6 +9,7 @@ import {
   createRuntimeStateTemplate,
   mergePersistedCloudflareState,
   mergePersistedProcessState,
+  mergePersistedUpdateState,
   normalizeRuntimeConfig,
   nowIso,
 } from "./runtime-state";
@@ -205,6 +206,7 @@ export class RuntimeStateStore {
 
       base.config = normalizeRuntimeConfig(parsed.config);
       base.cloudflare = mergePersistedCloudflareState(base.cloudflare, parsed.cloudflare);
+      base.update = mergePersistedUpdateState(base.update, parsed.update);
       base.phase = "starting";
       base.lastError = typeof parsed.lastError === "string" ? parsed.lastError : null;
       const persistedProcesses = parsed.processes && typeof parsed.processes === "object"

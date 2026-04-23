@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+
+const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf-8")) as { version: string };
 
 function mp3HealthProxyPlugin() {
   return {
@@ -62,6 +65,9 @@ function mp3HealthProxyPlugin() {
 
 export default defineConfig({
   plugins: [react(), mp3HealthProxyPlugin()],
+  define: {
+    "import.meta.env.VITE_APP_VERSION": JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "."),
