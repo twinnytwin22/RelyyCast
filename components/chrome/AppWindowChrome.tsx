@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
-import { BadgeQuestionMark, CircleQuestionMark, Minimize, Minimize2, MinusIcon, Moon, Sun, X } from "lucide-react";
+import { BadgeQuestionMark, CircleQuestionMark, MinusIcon, Moon, Sun, X } from "lucide-react";
 import {
   window as nlWindow,
   init as nlInit,
