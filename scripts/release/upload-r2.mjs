@@ -16,7 +16,17 @@ const ARTIFACT_CANDIDATES = [
   { filePath: path.join(DIST_DIR, "relyycast-linux-x64.AppImage"), platform: "linux" },
 ];
 
-const ENV_KEYS = ["S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_PREFIX", "S3_KEY", "S3_SECRET", "S3_PUBLIC_URL"];
+const ENV_KEYS = [
+  "S3_ENDPOINT",
+  "S3_REGION",
+  "S3_BUCKET",
+  "S3_PREFIX",
+  "S3_KEY",
+  "S3_SECRET",
+  "S3_PUBLIC_URL",
+  "DOWNLOAD_SYNC_URL",
+  "DOWNLOAD_SYNC_SECRET",
+];
 
 function parseDotenv(content) {
   const out = {};
@@ -112,21 +122,21 @@ function parseArgs(argv) {
 function normalizePlatform(raw) {
   if (!raw) return undefined;
   const value = raw.toLowerCase();
-  if (["mac", "macos", "darwin", "osx"].includes(value)) return "macos";
-  if (["win", "windows", "win32"].includes(value)) return "windows";
-  if (["linux", "gnu/linux", "gnu-linux"].includes(value)) return "linux";
+  if (["mac", "macos", "macos-universal", "darwin", "osx"].includes(value)) return "macos-universal";
+  if (["win", "windows", "windows-x64", "win32"].includes(value)) return "windows-x64";
+  if (["linux", "linux-x64", "gnu/linux", "gnu-linux"].includes(value)) return "linux-x64";
   return value;
 }
 
 function detectHostPlatform() {
-  if (process.platform === "darwin") return "macos";
-  if (process.platform === "win32") return "windows";
-  if (process.platform === "linux") return "linux";
+  if (process.platform === "darwin") return "macos-universal";
+  if (process.platform === "win32") return "windows-x64";
+  if (process.platform === "linux") return "linux-x64";
   return process.platform;
 }
 
 function printHelp() {
-  console.log(`Usage: node scripts/release/upload-r2.mjs [options]\n\nOptions:\n  --version <version>   Release version (defaults to package.json version)\n  --artifact <path>     Explicit artifact path (otherwise newest known artifact)\n  --platform <name>     Override platform segment in object key\n  --dry-run             Print plan without uploading\n  -h, --help            Show help\n\nRequired env vars:\n  S3_ENDPOINT, S3_BUCKET, S3_KEY, S3_SECRET\nOptional env vars:\n  S3_PREFIX (key prefix before releases/...); S3_REGION (default: auto), S3_PUBLIC_URL\n`);
+  console.log(`Usage: node scripts/release/upload-r2.mjs [options]\n\nOptions:\n  --version <version>   Release version (defaults to package.json version)\n  --artifact <path>     Explicit artifact path (otherwise newest known artifact)\n  --platform <name>     Override platform segment in object key\n  --dry-run             Print plan without uploading\n  -h, --help            Show help\n\nRequired env vars:\n  S3_ENDPOINT, S3_BUCKET, S3_KEY, S3_SECRET\nOptional env vars:\n  S3_PREFIX (key prefix before releases/...); S3_REGION (default: auto), S3_PUBLIC_URL, DOWNLOAD_SYNC_URL, DOWNLOAD_SYNC_SECRET\n`);
 }
 
 function readPackageVersion() {
@@ -324,6 +334,51 @@ async function uploadObjectWithRetries({
   }
 }
 
+async function notifyDownloadSync({ product, platform, latestManifestUrl, latestPayload }) {
+  const syncUrl = process.env.DOWNLOAD_SYNC_URL;
+  const syncSecret = process.env.DOWNLOAD_SYNC_SECRET;
+
+  if (!syncUrl) {
+    return;
+  }
+
+  const body = {
+    source: "relyycast-release-upload",
+    productSlug: product,
+    platformKey: platform,
+    manifestUrl: latestManifestUrl || undefined,
+    manifest: latestPayload,
+  };
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(syncUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(syncSecret ? { "x-download-sync-secret": syncSecret } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        throw new Error(`sync endpoint returned ${response.status}`);
+      }
+
+      console.log("[release:r2] Download catalog sync notified.");
+      return;
+    } catch (error) {
+      const delayMs = 750 * 2 ** (attempt - 1);
+      console.warn(
+        `[release:r2] Download catalog sync notify failed (attempt ${attempt}/3): ${error.message}`,
+      );
+      if (attempt < 3) {
+        await sleep(delayMs);
+      }
+    }
+  }
+}
+
 async function main() {
   loadReleaseEnvFiles();
   const args = parseArgs(process.argv.slice(2));
@@ -433,6 +488,12 @@ async function main() {
   if (latestPublicUrl) {
     console.log("[release:r2] Latest manifest:", latestPublicUrl);
   }
+  await notifyDownloadSync({
+    product: "relyycast",
+    platform,
+    latestManifestUrl: latestPublicUrl,
+    latestPayload,
+  });
 }
 
 main().catch((error) => {
